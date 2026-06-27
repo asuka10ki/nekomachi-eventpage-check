@@ -1,0 +1,66 @@
+online:
+  matchMode: contains
+  tickets:
+    - id: online_member_first
+      name: "オンライン会員"
+      note: "1回目"
+      price: 0
+      visibilityTags: ["オン"]
+
+    - id: local_member
+      name: "地域会員"
+      price: 800
+      visibilityTags: ["オフ"]
+
+    - id: online_member_second
+      name: "オンライン会員"
+      note: "2回目以降"
+      price: 800
+      visibilityTags: ["オン"]
+
+    - id: hybrid_member
+      name: "ハイブリッド会員"
+      price: 0
+      visibilityTags: ["ハイ"]
+
+    - id: non_member
+      name: "非会員"
+      price: 1100
+      visibilityTags: ["外"]
+
+offline:
+  matchMode: contains
+  tickets:
+    - id: local_member_first
+      name: "地域会員"
+      note: "1回目"
+      price: 0
+      visibilityTags: ["オフ"]
+
+    - id: hybrid_member_first
+      name: "ハイブリッド会員"
+      note: "1回目"
+      price: 0
+      visibilityTags: ["ハイ"]
+
+    - id: local_member_second
+      name: "地域会員"
+      note: "2回目以降"
+      price: 1800
+      visibilityTags: ["オフ"]
+
+    - id: hybrid_member_second
+      name: "ハイブリッド会員"
+      note: "2回目以降"
+      price: 1800
+      visibilityTags: ["ハイ"]
+
+    - id: online_member
+      name: "オンライン会員"
+      price: 1800
+      visibilityTags: ["オン"]
+
+    - id: non_member
+      name: "非会員"
+      price: 2300
+      visibilityTags: ["外"]
