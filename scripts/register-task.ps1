@@ -20,6 +20,7 @@ $Action = New-ScheduledTaskAction `
 $Trigger = New-ScheduledTaskTrigger -Daily -At $Time
 $Settings = New-ScheduledTaskSettingsSet `
   -StartWhenAvailable `
+  -WakeToRun `
   -ExecutionTimeLimit (New-TimeSpan -Hours 2) `
   -MultipleInstances IgnoreNew
 
