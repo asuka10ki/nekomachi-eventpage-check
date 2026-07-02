@@ -211,6 +211,23 @@ describe("event checks", () => {
     expect(checkEventInfo(event, rulesConfig).errors).not.toContain("チケット「オンライン会員 1回目」が複数存在します");
   });
 
+  it("ignores already-applied tickets in duplicate checks", () => {
+    const event: EventInfo = {
+      name: "オンライン読書会",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 14, 20, 0),
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "通常チケット 1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "猫町スクールにお申し込み済みの方 1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    expect(checkEventInfo(event, rulesConfig).errors).not.toContain("チケット「オンライン会員 1回目」が複数存在します");
+  });
+
   it("ignores applied-person tickets in price checks", () => {
     const event: EventInfo = {
       name: "オンライン読書会",
@@ -226,6 +243,114 @@ describe("event checks", () => {
     };
 
     expect(checkEventInfo(event, rulesConfig).errors.some((error) => error.includes("[1番目]") && error.includes("金額が期待値と異なります"))).toBe(false);
+  });
+
+  it("ignores already-applied tickets in price checks", () => {
+    const event: EventInfo = {
+      name: "オンライン読書会",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 14, 20, 0),
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "猫町スクールにお申し込み済みの方 1回目", price: 500, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "通常チケット 1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    expect(checkEventInfo(event, rulesConfig).errors.some((error) => error.includes("[1番目]") && error.includes("金額が期待値と異なります"))).toBe(false);
+  });
+
+  it("treats events with only applied-person tickets like free single-ticket events", () => {
+    const event: EventInfo = {
+      name: "オンライン読書会",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 14, 20, 0),
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "大阪会場で全6回にお申し込み済みの方", price: 0, visibility: null, visibilityTags: ["オン", "オフ", "ハイ", "外", "A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "オンラインで全6回にお申し込み済みの方", price: 0, visibility: null, visibilityTags: ["オン", "オフ", "ハイ", "外", "A", "U-22", "B"], onlineEnabled: true, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    expect(checkEventInfo(event, rulesConfig).ok).toBe(true);
+  });
+
+  it("requires a free operation member ticket for beginner events", () => {
+    const event: EventInfo = {
+      name: "【東京】ビギナー限定読書会",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 14, 20, 0),
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "通常チケット 1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    expect(checkEventInfo(event, rulesConfig).errors).toContain("初心者読書会・ビギナー限定イベントには無料の「運営メンバー」チケットが必要です");
+  });
+
+  it("requires operation member tickets to be free", () => {
+    const event: EventInfo = {
+      name: "初心者読書会",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 14, 20, 0),
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "通常チケット 1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "運営メンバー", price: 500, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "プラン変更後にお申込みください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    expect(checkEventInfo(event, rulesConfig).errors).toContain("[2番目] 「運営メンバー」チケットは無料である必要があります。実際: 500円");
+  });
+
+  it("excludes operation member tickets from plan and online field checks", () => {
+    const event: EventInfo = {
+      name: "初心者読書会",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 14, 20, 0),
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "通常チケット 1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "運営メンバー", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: true, onlineUrl: null, organizerNotice: "別のお知らせ" },
+        { name: "プラン変更後にお申込みください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    const errors = checkEventInfo(event, rulesConfig).errors;
+    expect(errors.some((error) => error.includes("期待ルールに一致しないチケット名") && error.includes("運営メンバー"))).toBe(false);
+    expect(errors.some((error) => error.includes("運営メンバー") && error.includes("オンライン参加URLが空"))).toBe(false);
+    expect(errors.some((error) => error.includes("主催者からのお知らせがチケット間で一致していません"))).toBe(false);
+  });
+
+  it("requires applied-person-only events to be free", () => {
+    const event: EventInfo = {
+      name: "オンライン読書会",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 14, 20, 0),
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "大阪会場で全6回にお申し込み済みの方", price: 500, visibility: null, visibilityTags: ["オン", "オフ", "ハイ", "外", "A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "オンラインで全6回にお申し込み済みの方", price: 0, visibility: null, visibilityTags: ["オン", "オフ", "ハイ", "外", "A", "U-22", "B"], onlineEnabled: true, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    expect(checkEventInfo(event, rulesConfig).errors).toEqual([
+      "[1番目] 特殊申込済みチケットのみのイベントは無料である必要があります。実際: 500円"
+    ]);
   });
 
   it("accepts a fixed-fee ticket plus plan-change ticket without normal plan rules", () => {

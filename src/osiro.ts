@@ -37,6 +37,14 @@ export async function collectEventListWithPagination(page: Page, listUrl: string
   return dedupeByUrl(all);
 }
 
+export async function collectEventListsWithPagination(page: Page, listUrls: string[]): Promise<EventListItem[]> {
+  const all: EventListItem[] = [];
+  for (const listUrl of listUrls) {
+    all.push(...(await collectEventListWithPagination(page, listUrl)));
+  }
+  return dedupeByUrl(all);
+}
+
 export async function fetchEventInfo(context: BrowserContext, item: EventListItem): Promise<EventInfo> {
   const page = await context.newPage();
   try {

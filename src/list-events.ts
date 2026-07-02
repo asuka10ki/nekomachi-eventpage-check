@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { chromium } from "playwright";
-import { EVENT_LIST_URL, loadEnv, STORAGE_STATE_PATH } from "./config.js";
-import { collectEventListWithPagination } from "./osiro.js";
+import { EVENT_LIST_URLS, loadEnv, STORAGE_STATE_PATH } from "./config.js";
+import { collectEventListsWithPagination } from "./osiro.js";
 import { classifyEventByName } from "./utils/classify.js";
 
 async function main(): Promise<void> {
@@ -15,7 +15,7 @@ async function main(): Promise<void> {
   const page = await context.newPage();
 
   try {
-    const events = await collectEventListWithPagination(page, EVENT_LIST_URL);
+    const events = await collectEventListsWithPagination(page, EVENT_LIST_URLS);
     console.log(`取得件数: ${events.length}`);
     events.forEach((event, index) => {
       console.log(`${index + 1}. [${classifyEventByName(event.name)}] ${event.name}`);

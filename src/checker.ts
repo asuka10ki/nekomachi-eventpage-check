@@ -15,6 +15,22 @@ export function checkEventInfo(event: EventInfo, rulesConfig: RulesConfig): Chec
   }
 
   const errors: string[] = [];
+  const ticketIndexes = new Map<TicketInfo, number>();
+  event.tickets.forEach((ticket, index) => ticketIndexes.set(ticket, index + 1));
+  validateOperationMemberTicket(event, errors, ticketIndexes);
+
+  if (isAppliedPersonOnlyEvent(event.tickets)) {
+    validateAllTicketsFree(event.tickets, errors, ticketIndexes);
+    return {
+      eventName: event.name,
+      kind: event.kind,
+      detailUrl: event.detailUrl,
+      startAt: event.startAt,
+      ok: errors.length === 0,
+      errors
+    };
+  }
+
   if (event.tickets.length === 1) {
     const onlyTicket = event.tickets[0];
     if (onlyTicket.price !== 0) {
@@ -34,8 +50,6 @@ export function checkEventInfo(event: EventInfo, rulesConfig: RulesConfig): Chec
   const matches = new Map<string, TicketInfo[]>();
   const unmatched: TicketInfo[] = [];
   const planChangeTickets: TicketInfo[] = [];
-  const ticketIndexes = new Map<TicketInfo, number>();
-  event.tickets.forEach((ticket, index) => ticketIndexes.set(ticket, index + 1));
 
   if (isFixedFeeWithPlanChangeEvent(event.tickets)) {
     validateLegacyMemberDuplicates(event, errors, ticketIndexes);
@@ -52,6 +66,9 @@ export function checkEventInfo(event: EventInfo, rulesConfig: RulesConfig): Chec
   }
 
   for (const ticket of event.tickets) {
+    if (isOperationMemberTicket(ticket)) {
+      continue;
+    }
     if (isPlanChangeTicket(ticket)) {
       planChangeTickets.push(ticket);
       continue;
@@ -143,7 +160,7 @@ function validateTicket(
 }
 
 function validateOnlineFields(event: EventInfo, errors: string[], ticketIndexes: Map<TicketInfo, number>): void {
-  const checkableTickets = event.tickets.filter((ticket) => !isPlanChangeTicket(ticket));
+  const checkableTickets = event.tickets.filter((ticket) => !isPlanChangeTicket(ticket) && !isOperationMemberTicket(ticket));
   const onlineTickets = checkableTickets.filter((ticket) => ticket.onlineEnabled === true);
   const urls = onlineTickets.map((ticket) => normalizeOnlineUrl(ticket.onlineUrl)).filter(Boolean);
 
@@ -218,12 +235,52 @@ function isPlanChangeTicket(ticket: TicketInfo): boolean {
   return /(プラン変更後|新プラン切り替え後|プラン切り替え後)にお申(?:し)?込み(?:下さい|ください)。?/.test(ticket.name);
 }
 
+function validateOperationMemberTicket(event: EventInfo, errors: string[], ticketIndexes: Map<TicketInfo, number>): void {
+  if (!requiresOperationMemberTicket(event)) return;
+
+  const tickets = event.tickets.filter((ticket) => isOperationMemberTicket(ticket));
+  if (tickets.length === 0) {
+    errors.push("初心者読書会・ビギナー限定イベントには無料の「運営メンバー」チケットが必要です");
+    return;
+  }
+
+  for (const ticket of tickets) {
+    if (ticket.price !== 0) {
+      errors.push(`${ticketPosition(ticket, ticketIndexes)}「運営メンバー」チケットは無料である必要があります。実際: ${ticket.price ?? "取得できません"}円`);
+    }
+  }
+}
+
+function requiresOperationMemberTicket(event: EventInfo): boolean {
+  return [event.name, ...event.tickets.map((ticket) => ticket.name)].some((text) => /初心者読書会|ビギナー限定/.test(text));
+}
+
+function isOperationMemberTicket(ticket: TicketInfo): boolean {
+  return ticket.name.includes("運営メンバー");
+}
+
 function isExcludedFromDuplicateCheck(ticket: TicketInfo): boolean {
-  return /お申(?:し)?込みいただいた方/.test(ticket.name);
+  return isAppliedPersonTicket(ticket);
 }
 
 function isExcludedFromPriceCheck(ticket: TicketInfo): boolean {
-  return /お申(?:し)?込みいただいた方/.test(ticket.name);
+  return isAppliedPersonTicket(ticket);
+}
+
+function isAppliedPersonTicket(ticket: TicketInfo): boolean {
+  return /お申(?:し)?込み(?:いただいた|済みの)方/.test(ticket.name);
+}
+
+function isAppliedPersonOnlyEvent(tickets: TicketInfo[]): boolean {
+  return tickets.length > 0 && tickets.every((ticket) => isAppliedPersonTicket(ticket));
+}
+
+function validateAllTicketsFree(tickets: TicketInfo[], errors: string[], ticketIndexes: Map<TicketInfo, number>): void {
+  for (const ticket of tickets) {
+    if (ticket.price !== 0) {
+      errors.push(`${ticketPosition(ticket, ticketIndexes)}特殊申込済みチケットのみのイベントは無料である必要があります。実際: ${ticket.price ?? "取得できません"}円`);
+    }
+  }
 }
 
 function isFixedFeeWithPlanChangeEvent(tickets: TicketInfo[]): boolean {

@@ -4,6 +4,10 @@ import YAML from "yaml";
 import type { RulesConfig } from "./types.js";
 
 export const EVENT_LIST_URL = "https://nekomachi-club.com/admin/events?state=yet_end";
+export const EVENT_LIST_URLS = [
+  EVENT_LIST_URL,
+  "https://nekomachi-club.com/admin/events?limit=30&page=2&state=yet_end"
+];
 export const STORAGE_STATE_PATH = "storageState.json";
 
 export type AppEnv = {

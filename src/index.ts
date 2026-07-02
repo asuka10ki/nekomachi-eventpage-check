@@ -2,8 +2,8 @@ import { chromium } from "playwright";
 import fs from "node:fs";
 import type { CheckResult, CheckSummary } from "./types.js";
 import { checkEventInfo, saveFailureArtifacts } from "./checker.js";
-import { EVENT_LIST_URL, loadEnv, loadRules, STORAGE_STATE_PATH } from "./config.js";
-import { collectEventListWithPagination, fetchEventInfo } from "./osiro.js";
+import { EVENT_LIST_URLS, loadEnv, loadRules, STORAGE_STATE_PATH } from "./config.js";
+import { collectEventListsWithPagination, fetchEventInfo } from "./osiro.js";
 import { postSummaryToSlack, printSummary } from "./slack.js";
 import { classifyEventByName } from "./utils/classify.js";
 import { sortResultsByStartAtDesc } from "./utils/sort.js";
@@ -22,7 +22,7 @@ async function main(): Promise<void> {
   let skippedCount = 0;
 
   try {
-    const items = await collectEventListWithPagination(page, EVENT_LIST_URL);
+    const items = await collectEventListsWithPagination(page, EVENT_LIST_URLS);
     for (const item of items) {
       const listKind = classifyEventByName(item.name);
       if (listKind === "skip") {
