@@ -1,4 +1,4 @@
-export type EventKind = "online" | "offline" | "skip";
+export type EventKind = "online" | "offline" | "hybrid" | "skip";
 
 export type EventListItem = {
   name: string;
@@ -30,6 +30,7 @@ export type TicketRule = {
   name: string;
   note?: string;
   price: number;
+  priceAlternatives?: number[];
   visibilityTags: string[];
 };
 

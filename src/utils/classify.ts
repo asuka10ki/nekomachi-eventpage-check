@@ -9,7 +9,7 @@ export function classifyEventByName(eventName: string): EventKind {
   }
 
   const offlineMarkers = ["【名古屋】", "【東京】", "【大阪】", "【京都】", "【福岡】", "東京開催"];
-  if (offlineMarkers.some((marker) => normalizedName.includes(marker))) {
+  if (offlineMarkers.some((marker) => normalizedName.includes(marker)) || /【福岡\s*第[一二三四五六七八九十\d]+回】/.test(normalizedName)) {
     return "offline";
   }
 

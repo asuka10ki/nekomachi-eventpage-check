@@ -17,23 +17,6 @@ export function extractBookTitle(text: string): string | null {
   return cleaned || null;
 }
 
-export function classifyTicketByName(ticketName: string, rules: TicketRule[]): TicketRule | null {
-  const text = normalizeTicketText(ticketName);
-  const matches = rules.filter((rule) => {
-    if (!text.includes(rule.name)) return false;
-    if (rule.note && !text.includes(rule.note)) return false;
-    if (!rule.note && rule.name === "オンライン会員" && text.includes("2回目以降")) return false;
-    if (!rule.note && (rule.name === "地域会員" || rule.name === "ハイブリッド会員") && /[12]回目/.test(text)) return false;
-    return true;
-  });
-  return matches.length === 1 ? matches[0] : null;
-}
-
-export function classifyTicketByInfo(ticket: TicketInfo, rules: TicketRule[]): TicketRule | null {
-  const matches = classifyTicketRulesByInfo(ticket, rules);
-  return matches.length === 1 ? matches[0] : null;
-}
-
 export function classifyTicketRulesByInfo(ticket: TicketInfo, rules: TicketRule[]): TicketRule[] {
   const text = normalizeTicketText(ticket.name);
   const matches = rules.filter((rule) => {
@@ -66,7 +49,7 @@ export function validateTicketNameMemberLabel(rule: TicketRule, ticketName: stri
   const text = normalizeTicketText(ticketName);
   const memberLabels = ["オンライン会員", "地域会員", "ハイブリッド会員", "非会員"];
   const includedLabels = memberLabels.filter((label) => text.includes(label));
-  const invalidLabels = includedLabels.filter((label) => label !== rule.name);
+  const invalidLabels = includedLabels.filter((label) => !rule.name.includes(label));
   if (invalidLabels.length === 0) return null;
   return `チケット名の会員名が閲覧権限と一致していません。期待: ${rule.name} / チケット名: ${invalidLabels.join(",")}`;
 }

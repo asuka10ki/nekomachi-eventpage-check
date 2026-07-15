@@ -56,18 +56,30 @@ export async function fetchEventInfo(context: BrowserContext, item: EventListIte
     const startText = formData.startAtText || (await getFieldText(page, ["開始日時", "開始日", "開催日時"]));
     const endText = formData.endAtText || (await getFieldText(page, ["終了日時", "終了日"]));
     const tickets = formData.tickets.length > 0 ? formData.tickets : await collectTickets(page);
+    const venue = formData.venue || await getFieldText(page, ["会場"]);
     return {
       name,
-      kind: classifyEventByName(name || item.name),
+      kind: classifyEventKind(name || item.name, venue),
       detailUrl: item.detailUrl,
       startAt: startText ? parseJapaneseDateTime(startText) : null,
       endAt: endText ? parseJapaneseDateTime(endText) : null,
-      venue: formData.venue || await getFieldText(page, ["会場"]),
+      venue,
       tickets
     };
   } finally {
     await page.close();
   }
+}
+
+function classifyEventKind(eventName: string, venue: string | null): EventInfo["kind"] {
+  const kind = classifyEventByName(eventName);
+  if (kind === "skip") return kind;
+  if (isHybridVenue(venue)) return "hybrid";
+  return kind;
+}
+
+function isHybridVenue(venue: string | null): boolean {
+  return /オフ会場\s*[+＋]\s*オンライン/.test(venue ?? "");
 }
 
 async function extractAdminEventFormData(page: Page): Promise<{

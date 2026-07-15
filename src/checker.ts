@@ -3,7 +3,7 @@ import path from "node:path";
 import type { CheckResult, EventInfo, RulesConfig, TicketInfo, TicketRule } from "./types.js";
 import { formatHourMinute } from "./utils/date.js";
 import { extractDeadlineTimeFromNotice, isDeadlineFiveMinutesBeforeStart } from "./utils/date.js";
-import { normalizeNoticeText } from "./utils/normalize.js";
+import { normalizeCommonText, normalizeNoticeText, normalizeTicketText } from "./utils/normalize.js";
 import { classifyTicketRulesByInfo, containsAllTags, sameTagSet, validateTicketNameBookTitle, validateTicketNameMemberLabel } from "./utils/ticket.js";
 import { normalizeOnlineUrl, safeFileName } from "./utils/url.js";
 
@@ -18,9 +18,13 @@ export function checkEventInfo(event: EventInfo, rulesConfig: RulesConfig): Chec
   const ticketIndexes = new Map<TicketInfo, number>();
   event.tickets.forEach((ticket, index) => ticketIndexes.set(ticket, index + 1));
   validateOperationMemberTicket(event, errors, ticketIndexes);
+  validateAppliedPersonTicketNames(event.tickets, errors, ticketIndexes);
 
-  if (isAppliedPersonOnlyEvent(event.tickets)) {
-    validateAllTicketsFree(event.tickets, errors, ticketIndexes);
+  if (event.tickets.length === 1) {
+    const onlyTicket = event.tickets[0];
+    if (!isAppliedPersonTicket(onlyTicket) && onlyTicket.price !== 0) {
+      errors.push(`チケットが1つだけのイベントは無料である必要があります。実際: ${onlyTicket.price ?? "取得できません"}円`);
+    }
     return {
       eventName: event.name,
       kind: event.kind,
@@ -31,11 +35,7 @@ export function checkEventInfo(event: EventInfo, rulesConfig: RulesConfig): Chec
     };
   }
 
-  if (event.tickets.length === 1) {
-    const onlyTicket = event.tickets[0];
-    if (onlyTicket.price !== 0) {
-      errors.push(`チケットが1つだけのイベントは無料である必要があります。実際: ${onlyTicket.price ?? "取得できません"}円`);
-    }
+  if (areAllAppliedPersonTickets(event.tickets)) {
     return {
       eventName: event.name,
       kind: event.kind,
@@ -50,6 +50,10 @@ export function checkEventInfo(event: EventInfo, rulesConfig: RulesConfig): Chec
   const matches = new Map<string, TicketInfo[]>();
   const unmatched: TicketInfo[] = [];
   const planChangeTickets: TicketInfo[] = [];
+
+  if (event.tickets.length === 2 && !event.tickets.some((ticket) => isPlanChangeTicket(ticket))) {
+    errors.push("固定費イベントでは、片方がプラン変更チケットである必要があります");
+  }
 
   if (isFixedFeeWithPlanChangeEvent(event.tickets)) {
     validateLegacyMemberDuplicates(event, errors, ticketIndexes);
@@ -92,6 +96,9 @@ export function checkEventInfo(event: EventInfo, rulesConfig: RulesConfig): Chec
     const tickets = (matches.get(rule.id) ?? []).filter((ticket) => !isExcludedFromDuplicateCheck(ticket));
     const label = ticketRuleLabel(rule);
     if (tickets.length === 0) errors.push(`期待されるチケット「${label}」が見つかりません`);
+    if (runsOfflineChecks(event) && tickets.length > 0) {
+      validateOfflineParticipationForRule(rule, label, tickets, errors);
+    }
     if (tickets.length > 1 && !isAllowedDuplicateTicket(rule, tickets, event.kind)) {
       errors.push(`チケット「${label}」が複数存在します`);
     }
@@ -105,10 +112,10 @@ export function checkEventInfo(event: EventInfo, rulesConfig: RulesConfig): Chec
 
   validatePlanChangeTicket(planChangeTickets, errors, ticketIndexes);
 
-  if (event.kind === "online") {
+  if (runsOnlineChecks(event)) {
     validateOnlineFields(event, errors, ticketIndexes);
   }
-  if (event.kind === "offline") {
+  if (runsOfflineChecks(event)) {
     validateOfflineParticipationTypes(event.tickets, errors);
   }
 
@@ -144,12 +151,15 @@ function validateTicket(
   const label = ticketRuleLabel(rule);
   const bookError = validateTicketNameBookTitle(eventName, ticket.name);
   if (bookError) errors.push(`${ticketPosition(ticket, ticketIndexes)}チケット「${label}」: ${bookError}`);
+  const recurrenceError = validateTicketNameRecurrence(rule, ticket);
+  if (recurrenceError) errors.push(`${ticketPosition(ticket, ticketIndexes)}チケット「${label}」: ${recurrenceError}`);
   if (!allowAdditionalVisibilityTags) {
     const memberLabelError = validateTicketNameMemberLabel(rule, ticket.name);
     if (memberLabelError) errors.push(`${ticketPosition(ticket, ticketIndexes)}チケット「${label}」: ${memberLabelError}`);
   }
-  if (!isExcludedFromPriceCheck(ticket) && ticket.price !== rule.price) {
-    errors.push(`${ticketPosition(ticket, ticketIndexes)}チケット「${label}」: 金額が期待値と異なります。期待: ${rule.price}円 / 実際: ${ticket.price ?? "取得できません"}`);
+  const expectedPrices = [rule.price, ...(rule.priceAlternatives ?? [])];
+  if (!isExcludedFromPriceCheck(ticket) && !expectedPrices.includes(ticket.price ?? Number.NaN)) {
+    errors.push(`${ticketPosition(ticket, ticketIndexes)}チケット「${label}」: 金額が期待値と異なります。期待: ${expectedPrices.join("円 または ")}円 / 実際: ${ticket.price ?? "取得できません"}`);
   }
   const visibilityOk = allowAdditionalVisibilityTags
     ? containsAllTags(ticket.visibilityTags, rule.visibilityTags)
@@ -160,7 +170,8 @@ function validateTicket(
 }
 
 function validateOnlineFields(event: EventInfo, errors: string[], ticketIndexes: Map<TicketInfo, number>): void {
-  const checkableTickets = event.tickets.filter((ticket) => !isPlanChangeTicket(ticket) && !isOperationMemberTicket(ticket));
+  const checkableTickets = event.tickets.filter((ticket) => !isPlanChangeTicket(ticket));
+  const noticeCheckableTickets = checkableTickets;
   const onlineTickets = checkableTickets.filter((ticket) => ticket.onlineEnabled === true);
   const urls = onlineTickets.map((ticket) => normalizeOnlineUrl(ticket.onlineUrl)).filter(Boolean);
 
@@ -173,7 +184,7 @@ function validateOnlineFields(event: EventInfo, errors: string[], ticketIndexes:
     errors.push("オンライン参加URLがチケット間で一致していません");
   }
 
-  const noticeGroups = groupTicketsByNormalizedNotice(checkableTickets);
+  const noticeGroups = groupTicketsByNormalizedNotice(noticeCheckableTickets);
   if (noticeGroups.length > 1) {
     const outlier = noticeGroups.length === 2 ? noticeGroups.find((group) => group.tickets.length === 1) : undefined;
     if (outlier) {
@@ -184,7 +195,7 @@ function validateOnlineFields(event: EventInfo, errors: string[], ticketIndexes:
     }
   }
 
-  for (const ticket of checkableTickets) {
+  for (const ticket of noticeCheckableTickets) {
     const notice = ticket.organizerNotice ?? "";
     const actual = extractDeadlineTimeFromNotice(notice);
     if (!event.startAt) {
@@ -203,36 +214,82 @@ function ticketRuleLabel(rule: TicketRule): string {
 }
 
 function rulesForEvent(event: EventInfo, rulesConfig: RulesConfig): TicketRule[] {
-  if (event.kind === "offline" && isGuestOfflineEvent(event)) {
+  if (event.kind === "online" && isGuestOnlineEvent(event)) {
     return [
-      { id: "local_member_first", name: "地域会員", note: "1回目", price: 800, visibilityTags: ["オフ"] },
-      { id: "hybrid_member_first", name: "ハイブリッド会員", note: "1回目", price: 800, visibilityTags: ["ハイ"] },
-      { id: "local_member_second", name: "地域会員", note: "2回目以降", price: 3000, visibilityTags: ["オフ"] },
-      { id: "hybrid_member_second", name: "ハイブリッド会員", note: "2回目以降", price: 3000, visibilityTags: ["ハイ"] },
-      { id: "online_member", name: "オンライン会員", price: 3000, visibilityTags: ["オン"] },
-      { id: "non_member", name: "非会員", price: 3500, visibilityTags: ["外"] }
+      { id: "online_member_first", name: "オンライン会員", note: "1回目", price: 550, visibilityTags: ["オン"] },
+      { id: "local_member", name: "地域会員", price: 1200, visibilityTags: ["オフ"] },
+      { id: "online_member_second", name: "オンライン会員", note: "2回目以降", price: 1200, visibilityTags: ["オン"] },
+      { id: "hybrid_member", name: "ハイブリッド会員", price: 550, visibilityTags: ["ハイ"] },
+      { id: "non_member", name: "非会員", price: 1500, visibilityTags: ["外"] }
+    ];
+  }
+
+  if (runsOfflineChecks(event) && isGuestOfflineEvent(event)) {
+    return [
+      { id: "local_member_first", name: "地域会員", note: "1回目", price: 800, priceAlternatives: [500], visibilityTags: ["オフ"] },
+      { id: "hybrid_member_first", name: "ハイブリッド会員", note: "1回目", price: 800, priceAlternatives: [500], visibilityTags: ["ハイ"] },
+      { id: "local_member_second", name: "地域会員", note: "2回目以降", price: 3000, priceAlternatives: [2300], visibilityTags: ["オフ"] },
+      { id: "hybrid_member_second", name: "ハイブリッド会員", note: "2回目以降", price: 3000, priceAlternatives: [2300], visibilityTags: ["ハイ"] },
+      { id: "online_member", name: "オンライン会員", price: 3000, priceAlternatives: [2300], visibilityTags: ["オン"] },
+      { id: "non_member", name: "非会員", price: 3500, priceAlternatives: [2800], visibilityTags: ["外"] }
     ];
   }
 
   if (event.kind === "skip") return [];
-  return rulesConfig[event.kind].tickets;
+  return (runsOfflineChecks(event) ? rulesConfig.offline : rulesConfig.online).tickets;
+}
+
+function runsOnlineChecks(event: EventInfo): boolean {
+  return event.kind === "online" || event.kind === "hybrid";
+}
+
+function runsOfflineChecks(event: EventInfo): boolean {
+  return event.kind === "offline" || event.kind === "hybrid";
 }
 
 function isGuestOfflineEvent(event: EventInfo): boolean {
-  if (/ゲスト|さんと読む/.test(event.name)) return true;
+  if (isGuestEventName(event)) return true;
 
   const checkableTickets = event.tickets.filter((ticket) => !isPlanChangeTicket(ticket));
-  const hasGuestNonMemberPrice = checkableTickets.some((ticket) => ticket.visibilityTags.includes("外") && ticket.price === 3500);
+  const hasGuestNonMemberPrice = checkableTickets.some((ticket) => ticket.visibilityTags.includes("外") && (ticket.price === 3500 || ticket.price === 2800));
   const hasGuestMemberPrice = checkableTickets.some((ticket) => {
     const hasMemberTag = ticket.visibilityTags.some((tag) => ["オン", "オフ", "ハイ"].includes(tag));
-    return hasMemberTag && ticket.price === 3000;
+    return hasMemberTag && (ticket.price === 3000 || ticket.price === 2300);
   });
 
   return hasGuestNonMemberPrice || hasGuestMemberPrice;
 }
 
+function isGuestOnlineEvent(event: EventInfo): boolean {
+  if (isGuestEventName(event)) return true;
+
+  const checkableTickets = event.tickets.filter((ticket) => !isPlanChangeTicket(ticket));
+  const hasGuestNonMemberPrice = checkableTickets.some((ticket) => ticket.visibilityTags.includes("外") && ticket.price === 1500);
+  const hasGuestMemberPrice = checkableTickets.some((ticket) => {
+    const hasMemberTag = ticket.visibilityTags.some((tag) => ["オン", "オフ", "ハイ"].includes(tag));
+    return hasMemberTag && (ticket.price === 550 || ticket.price === 1200);
+  });
+
+  return hasGuestNonMemberPrice || hasGuestMemberPrice;
+}
+
+function isGuestEventName(event: EventInfo): boolean {
+  return /ゲスト|さんと読む/.test(event.name);
+}
+
 function isPlanChangeTicket(ticket: TicketInfo): boolean {
   return /(プラン変更後|新プラン切り替え後|プラン切り替え後)にお申(?:し)?込み(?:下さい|ください)。?/.test(ticket.name);
+}
+
+function validateTicketNameRecurrence(rule: TicketRule, ticket: TicketInfo): string | null {
+  const text = normalizeTicketText(ticket.name);
+  if (rule.note === "1回目" && !text.includes("今月1回目")) {
+    return "1回目チケット名には「今月1回目」を入れてください";
+  }
+  if (rule.note === "2回目以降" && !text.includes("今月2回目以降")) {
+    return "2回目以降チケット名には「今月2回目以降」を入れてください";
+  }
+  return null;
 }
 
 function validateOperationMemberTicket(event: EventInfo, errors: string[], ticketIndexes: Map<TicketInfo, number>): void {
@@ -268,19 +325,19 @@ function isExcludedFromPriceCheck(ticket: TicketInfo): boolean {
 }
 
 function isAppliedPersonTicket(ticket: TicketInfo): boolean {
-  return /お申(?:し)?込み(?:いただいた|済みの)方/.test(ticket.name);
+  return /お申し込み済みの方/.test(ticket.name);
 }
 
-function isAppliedPersonOnlyEvent(tickets: TicketInfo[]): boolean {
-  return tickets.length > 0 && tickets.every((ticket) => isAppliedPersonTicket(ticket));
-}
-
-function validateAllTicketsFree(tickets: TicketInfo[], errors: string[], ticketIndexes: Map<TicketInfo, number>): void {
+function validateAppliedPersonTicketNames(tickets: TicketInfo[], errors: string[], ticketIndexes: Map<TicketInfo, number>): void {
   for (const ticket of tickets) {
-    if (ticket.price !== 0) {
-      errors.push(`${ticketPosition(ticket, ticketIndexes)}特殊申込済みチケットのみのイベントは無料である必要があります。実際: ${ticket.price ?? "取得できません"}円`);
+    if (/お申(?:し)?込みいただいた方/.test(ticket.name)) {
+      errors.push(`${ticketPosition(ticket, ticketIndexes)}特殊申込済みチケット名は「お申し込み済みの方」に統一してください: 「${ticket.name}」`);
     }
   }
+}
+
+function areAllAppliedPersonTickets(tickets: TicketInfo[]): boolean {
+  return tickets.length > 0 && tickets.every((ticket) => isAppliedPersonTicket(ticket));
 }
 
 function isFixedFeeWithPlanChangeEvent(tickets: TicketInfo[]): boolean {
@@ -310,6 +367,9 @@ function validatePlanChangeTicket(tickets: TicketInfo[], errors: string[], ticke
   }
 
   for (const ticket of tickets) {
+    if (normalizeCommonText(ticket.name) !== PLAN_CHANGE_TICKET_TEXT) {
+      errors.push(`${ticketPosition(ticket, ticketIndexes)}プラン変更チケット名は「${PLAN_CHANGE_TICKET_TEXT}」にしてください: 「${ticket.name}」`);
+    }
     const expectedTags = ["A", "U-22", "B"];
     if (!containsAllTags(ticket.visibilityTags, expectedTags)) {
       errors.push(`${ticketPosition(ticket, ticketIndexes)}チケット「${PLAN_CHANGE_TICKET_TEXT}」: 閲覧権限が期待値と異なります。期待: A,U-22,B / 実際: ${ticket.visibilityTags.join(",") || ticket.visibility || "取得できません"}`);
@@ -323,15 +383,54 @@ function ticketPosition(ticket: TicketInfo, ticketIndexes: Map<TicketInfo, numbe
 }
 
 function isAllowedDuplicateTicket(rule: TicketRule, tickets: TicketInfo[], kind: EventInfo["kind"]): boolean {
-  if (kind === "offline") {
+  if (kind === "offline" || kind === "hybrid") {
+    if (rule.id === "non_member") {
+      const firstTimeTickets = tickets.filter((ticket) => isFirstTimeTicket(ticket));
+      return hasOneOfflineParticipationPair(tickets.filter((ticket) => !isFirstTimeTicket(ticket)))
+        && (firstTimeTickets.length === 0 || hasOneOfflineParticipationPair(firstTimeTickets));
+    }
     const participationTypes = tickets.map((ticket) => getOfflineParticipationType(ticket)).filter(Boolean);
-    return participationTypes.includes("reading") && participationTypes.includes("afterParty");
+    return tickets.length === 2 && participationTypes.includes("reading") && participationTypes.includes("afterParty");
   }
 
   if (rule.id !== "non_member" || tickets.length !== 2) return false;
   const hasFirstTime = tickets.some((ticket) => /初参加/.test(ticket.name));
   const hasRegular = tickets.some((ticket) => !/初参加/.test(ticket.name));
   return hasFirstTime && hasRegular;
+}
+
+function validateOfflineParticipationForRule(rule: TicketRule, label: string, tickets: TicketInfo[], errors: string[]): void {
+  if (rule.id === "non_member") {
+    validateOfflineNonMemberParticipation(label, tickets, errors);
+    return;
+  }
+  validateOfflineParticipationPair(label, tickets, errors);
+}
+
+function validateOfflineNonMemberParticipation(label: string, tickets: TicketInfo[], errors: string[]): void {
+  const firstTimeTickets = tickets.filter((ticket) => isFirstTimeTicket(ticket));
+  validateOfflineParticipationPair(`${label} 通常`, tickets.filter((ticket) => !isFirstTimeTicket(ticket)), errors);
+  if (firstTimeTickets.length > 0) {
+    validateOfflineParticipationPair(`${label} 初参加`, firstTimeTickets, errors);
+  }
+}
+
+function validateOfflineParticipationPair(label: string, tickets: TicketInfo[], errors: string[]): void {
+  const participationTypes = tickets.map((ticket) => getOfflineParticipationType(ticket));
+  const readingCount = participationTypes.filter((type) => type === "reading").length;
+  const afterPartyCount = participationTypes.filter((type) => type === "afterParty").length;
+  const otherCount = participationTypes.filter((type) => type === null).length;
+
+  if (readingCount === 1 && afterPartyCount === 1 && otherCount === 0) return;
+
+  errors.push(`オフラインチケット「${label}」は「読書会のみ参加」と「懇親会まで参加」が1つずつ必要です。実際: 読書会のみ参加 ${readingCount}件 / 懇親会まで参加 ${afterPartyCount}件 / 参加種別不明 ${otherCount}件`);
+}
+
+function hasOneOfflineParticipationPair(tickets: TicketInfo[]): boolean {
+  const participationTypes = tickets.map((ticket) => getOfflineParticipationType(ticket));
+  return tickets.length === 2
+    && participationTypes.filter((type) => type === "reading").length === 1
+    && participationTypes.filter((type) => type === "afterParty").length === 1;
 }
 
 function validateOfflineParticipationTypes(tickets: TicketInfo[], errors: string[]): void {
@@ -350,6 +449,10 @@ function getOfflineParticipationType(ticket: TicketInfo): "reading" | "afterPart
   return null;
 }
 
+function isFirstTimeTicket(ticket: TicketInfo): boolean {
+  return /初参加/.test(ticket.name);
+}
+
 function validateLegacyMemberDuplicates(event: EventInfo, errors: string[], ticketIndexes: Map<TicketInfo, number>): void {
   const legacyTags = ["A", "U-22", "B"];
   const groups = new Map<string, TicketInfo[]>();
@@ -362,7 +465,7 @@ function validateLegacyMemberDuplicates(event: EventInfo, errors: string[], tick
       }
     }
     if (isPlanChangeTicket(ticket)) continue;
-    const participationType = event.kind === "offline" ? getOfflineParticipationType(ticket) ?? "other" : "default";
+    const participationType = runsOfflineChecks(event) ? getOfflineParticipationType(ticket) ?? "other" : "default";
     for (const tag of legacyTags) {
       if (!ticket.visibilityTags.includes(tag)) continue;
       const key = `${tag}:${participationType}`;

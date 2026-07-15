@@ -101,5 +101,5 @@ function formatEventNameWithStartAt(eventName: string, startAt: Date | null): st
 }
 
 function kindLabel(kind: EventKind): string {
-  return kind === "online" ? "オンライン" : kind === "offline" ? "オフライン" : "対象外";
+  return kind === "online" ? "オンライン" : kind === "offline" ? "オフライン" : kind === "hybrid" ? "オフ＋オン" : "対象外";
 }

@@ -3,7 +3,7 @@ import { classifyEventByName } from "../src/utils/classify.js";
 import { extractDeadlineTimeFromNotice, isDeadlineFiveMinutesBeforeStart } from "../src/utils/date.js";
 import { normalizePriceText, normalizeTicketText, normalizeVisibilityTags } from "../src/utils/normalize.js";
 import { normalizeOnlineUrl } from "../src/utils/url.js";
-import { classifyTicketByInfo, classifyTicketRulesByInfo, extractBookTitle, validateTicketNameBookTitle, validateTicketNameMemberLabel } from "../src/utils/ticket.js";
+import { classifyTicketRulesByInfo, extractBookTitle, validateTicketNameBookTitle, validateTicketNameMemberLabel } from "../src/utils/ticket.js";
 import { checkEventInfo } from "../src/checker.js";
 import { buildSlackMessages } from "../src/slack.js";
 import { sortResultsByStartAtDesc } from "../src/utils/sort.js";
@@ -14,6 +14,7 @@ describe("event classification", () => {
     expect(classifyEventByName("〖東京〗『存在と時間』読書会")).toBe("offline");
     expect(classifyEventByName("〖予告〗『存在と時間』読書会")).toBe("skip");
     expect(classifyEventByName("U35で読む 村田沙耶香『コンビニ人間』｜U35 BOOK CLUB 東京開催")).toBe("offline");
+    expect(classifyEventByName("【福岡 第一回】ゲストと読む『存在と時間』")).toBe("offline");
     expect(classifyEventByName("事務局決済")).toBe("skip");
     expect(classifyEventByName("『存在と時間』読書会")).toBe("online");
   });
@@ -49,7 +50,7 @@ describe("book title", () => {
   it("validates event and ticket title match", () => {
     expect(validateTicketNameBookTitle("『存在と時間』読書会", "『存在と時間』オンライン会員 1回目")).toBeNull();
     expect(validateTicketNameBookTitle("『存在と時間』読書会", "オンライン参加 ※1回目")).toBeNull();
-    expect(validateTicketNameBookTitle("『存在と時間』読書会", "猫町スクールに「読書会なし」でお申し込みいただいた方")).toBeNull();
+    expect(validateTicketNameBookTitle("『存在と時間』読書会", "猫町スクールに「読書会なし」でお申し込み済みの方")).toBeNull();
     expect(validateTicketNameBookTitle("『存在と時間』読書会", "『純粋理性批判』オンライン会員 1回目")).toContain("別の本");
   });
 });
@@ -68,11 +69,11 @@ describe("ticket classification", () => {
   }
 
   it("uses visibility and price when ticket names omit member labels", () => {
-    expect(classifyTicketByInfo(ticket("神谷 美恵子『生きがいについて』（1回目）", 0, ["オン"]), rules)?.id).toBe("online_member_first");
-    expect(classifyTicketByInfo(ticket("神谷 美恵子『生きがいについて』（2回目）", 800, ["オン"]), rules)?.id).toBe("online_member_second");
-    expect(classifyTicketByInfo(ticket("神谷 美恵子『生きがいについて』", 800, ["オフ"]), rules)?.id).toBe("local_member");
-    expect(classifyTicketByInfo(ticket("神谷 美恵子『生きがいについて』", 0, ["ハイ"]), rules)?.id).toBe("hybrid_member");
-    expect(classifyTicketByInfo(ticket("神谷 美恵子『生きがいについて』", 1100, ["外"]), rules)?.id).toBe("non_member");
+    expect(classifyTicketRulesByInfo(ticket("神谷 美恵子『生きがいについて』（1回目）", 0, ["オン"]), rules).map((rule) => rule.id)).toEqual(["online_member_first"]);
+    expect(classifyTicketRulesByInfo(ticket("神谷 美恵子『生きがいについて』（2回目）", 800, ["オン"]), rules).map((rule) => rule.id)).toEqual(["online_member_second"]);
+    expect(classifyTicketRulesByInfo(ticket("神谷 美恵子『生きがいについて』", 800, ["オフ"]), rules).map((rule) => rule.id)).toEqual(["local_member"]);
+    expect(classifyTicketRulesByInfo(ticket("神谷 美恵子『生きがいについて』", 0, ["ハイ"]), rules).map((rule) => rule.id)).toEqual(["hybrid_member"]);
+    expect(classifyTicketRulesByInfo(ticket("神谷 美恵子『生きがいについて』", 1100, ["外"]), rules).map((rule) => rule.id)).toEqual(["non_member"]);
   });
 
   it("allows one ticket to belong to multiple member plans", () => {
@@ -177,6 +178,22 @@ describe("event checks", () => {
     expect(checkEventInfo(event, rulesConfig).ok).toBe(true);
   });
 
+  it("does not require a single applied-person ticket to be free", () => {
+    const event: EventInfo = {
+      name: "申込済みイベント",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 14, 20, 0),
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "全回にお申し込み済みの方", price: 5000, visibility: "全員", visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    expect(checkEventInfo(event, rulesConfig).errors).not.toContain("チケットが1つだけのイベントは無料である必要があります。実際: 5000円");
+  });
+
   it("accepts offline reading and after-party ticket variants for the same plan", () => {
     const event: EventInfo = {
       name: "【東京】読書会",
@@ -186,15 +203,172 @@ describe("event checks", () => {
       endAt: null,
       venue: null,
       tickets: [
-        { name: "読書会のみ参加 ※1回目", price: 0, visibility: null, visibilityTags: ["オフ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
-        { name: "懇親会まで参加 ※1回目", price: 0, visibility: null, visibilityTags: ["オフ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+        { name: "読書会のみ参加 ※今月1回目", price: 0, visibility: null, visibilityTags: ["オフ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "懇親会まで参加 ※今月1回目", price: 0, visibility: null, visibilityTags: ["オフ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
     expect(checkEventInfo(event, rulesConfig).errors).not.toContain("チケット「地域会員 1回目」が複数存在します");
   });
 
-  it("ignores applied-person tickets in duplicate checks", () => {
+  it("requires one reading and one after-party ticket for each offline member plan", () => {
+    const event: EventInfo = {
+      name: "【東京】読書会",
+      kind: "offline",
+      detailUrl: "https://example.com",
+      startAt: null,
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "読書会のみ参加 ※今月1回目", price: 0, visibility: null, visibilityTags: ["オフ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "懇親会まで参加 ※今月1回目", price: 0, visibility: null, visibilityTags: ["ハイ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    const errors = checkEventInfo(event, {
+      online: rulesConfig.online,
+      offline: {
+        matchMode: "contains",
+        tickets: [
+          { id: "local_member_first", name: "地域会員", note: "1回目", price: 0, visibilityTags: ["オフ"] },
+          { id: "hybrid_member_first", name: "ハイブリッド会員", note: "1回目", price: 0, visibilityTags: ["ハイ"] }
+        ]
+      }
+    }).errors;
+
+    expect(errors).toContain("オフラインチケット「地域会員 1回目」は「読書会のみ参加」と「懇親会まで参加」が1つずつ必要です。実際: 読書会のみ参加 1件 / 懇親会まで参加 0件 / 参加種別不明 0件");
+    expect(errors).toContain("オフラインチケット「ハイブリッド会員 1回目」は「読書会のみ参加」と「懇親会まで参加」が1つずつ必要です。実際: 読書会のみ参加 0件 / 懇親会まで参加 1件 / 参加種別不明 0件");
+  });
+
+  it("runs both online and offline checks for hybrid venue events", () => {
+    const event: EventInfo = {
+      name: "オフライン併用読書会",
+      kind: "hybrid",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 14, 20, 0),
+      endAt: null,
+      venue: "オフ会場＋オンライン",
+      tickets: [
+        { name: "読書会のみ参加 ※今月1回目", price: 0, visibility: null, visibilityTags: ["オフ"], onlineEnabled: true, onlineUrl: null, organizerNotice: "19:55までに参加してください" },
+        { name: "追加チケット ※今月1回目", price: 0, visibility: null, visibilityTags: ["オフ"], onlineEnabled: false, onlineUrl: null, organizerNotice: "19:55までに参加してください" }
+      ]
+    };
+
+    const errors = checkEventInfo(event, rulesConfig).errors;
+
+    expect(errors.some((error) => error.includes("オンライン参加URLが空"))).toBe(true);
+    expect(errors).toContain("オフライン読書会には「懇親会まで参加」チケットが必要です");
+  });
+
+  it("rejects duplicate offline participation types for the same member plan", () => {
+    const event: EventInfo = {
+      name: "【東京】読書会",
+      kind: "offline",
+      detailUrl: "https://example.com",
+      startAt: null,
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "読書会のみ参加 A ※今月1回目", price: 0, visibility: null, visibilityTags: ["オフ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "読書会のみ参加 B ※今月1回目", price: 0, visibility: null, visibilityTags: ["オフ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "懇親会まで参加 ※今月1回目", price: 0, visibility: null, visibilityTags: ["オフ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    const errors = checkEventInfo(event, rulesConfig).errors;
+
+    expect(errors).toContain("オフラインチケット「地域会員 1回目」は「読書会のみ参加」と「懇親会まで参加」が1つずつ必要です。実際: 読書会のみ参加 2件 / 懇親会まで参加 1件 / 参加種別不明 0件");
+    expect(errors).toContain("チケット「地域会員 1回目」が複数存在します");
+  });
+
+  it("allows optional first-time offline non-member participation pairs", () => {
+    const event: EventInfo = {
+      name: "【東京】読書会",
+      kind: "offline",
+      detailUrl: "https://example.com",
+      startAt: null,
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "非会員 読書会のみ参加", price: 2300, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "非会員 懇親会まで参加", price: 2300, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "非会員 初参加 読書会のみ参加", price: 2300, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "非会員 初参加 懇親会まで参加", price: 2300, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    const errors = checkEventInfo(event, {
+      online: rulesConfig.online,
+      offline: {
+        matchMode: "contains",
+        tickets: [
+          { id: "non_member", name: "非会員", price: 2300, visibilityTags: ["外"] }
+        ]
+      }
+    }).errors;
+
+    expect(errors).not.toContain("チケット「非会員」が複数存在します");
+    expect(errors.some((error) => error.includes("オフラインチケット「非会員"))).toBe(false);
+  });
+
+  it("accepts offline non-member tickets without first-time tickets", () => {
+    const event: EventInfo = {
+      name: "【東京】読書会",
+      kind: "offline",
+      detailUrl: "https://example.com",
+      startAt: null,
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "非会員 読書会のみ参加", price: 2300, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "非会員 懇親会まで参加", price: 2300, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    const errors = checkEventInfo(event, {
+      online: rulesConfig.online,
+      offline: {
+        matchMode: "contains",
+        tickets: [
+          { id: "non_member", name: "非会員", price: 2300, visibilityTags: ["外"] }
+        ]
+      }
+    }).errors;
+
+    expect(errors).not.toContain("チケット「非会員」が複数存在します");
+    expect(errors.some((error) => error.includes("オフラインチケット「非会員"))).toBe(false);
+  });
+
+  it("detects missing first-time offline non-member participation tickets", () => {
+    const event: EventInfo = {
+      name: "【東京】読書会",
+      kind: "offline",
+      detailUrl: "https://example.com",
+      startAt: null,
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "非会員 読書会のみ参加", price: 2300, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "非会員 懇親会まで参加", price: 2300, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "非会員 初参加 読書会のみ参加", price: 2300, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    const errors = checkEventInfo(event, {
+      online: rulesConfig.online,
+      offline: {
+        matchMode: "contains",
+        tickets: [
+          { id: "non_member", name: "非会員", price: 2300, visibilityTags: ["外"] }
+        ]
+      }
+    }).errors;
+
+    expect(errors).toContain("オフラインチケット「非会員 初参加」は「読書会のみ参加」と「懇親会まで参加」が1つずつ必要です。実際: 読書会のみ参加 1件 / 懇親会まで参加 0件 / 参加種別不明 0件");
+    expect(errors).toContain("チケット「非会員」が複数存在します");
+  });
+
+  it("requires monthly wording for first and second tickets", () => {
     const event: EventInfo = {
       name: "オンライン読書会",
       kind: "online",
@@ -204,11 +378,41 @@ describe("event checks", () => {
       venue: null,
       tickets: [
         { name: "通常チケット 1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
-        { name: "猫町スクールにお申し込みいただいた方 1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+        { name: "通常チケット 2回目", price: 800, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
-    expect(checkEventInfo(event, rulesConfig).errors).not.toContain("チケット「オンライン会員 1回目」が複数存在します");
+    const errors = checkEventInfo(event, {
+      online: {
+        matchMode: "contains",
+        tickets: [
+          { id: "online_member_first", name: "オンライン会員", note: "1回目", price: 0, visibilityTags: ["オン"] },
+          { id: "online_member_second", name: "オンライン会員", note: "2回目以降", price: 800, visibilityTags: ["オン"] }
+        ]
+      },
+      offline: rulesConfig.offline
+    }).errors;
+
+    expect(errors).toContain("[1番目] チケット「オンライン会員 1回目」: 1回目チケット名には「今月1回目」を入れてください");
+    expect(errors).toContain("[2番目] チケット「オンライン会員 2回目以降」: 2回目以降チケット名には「今月2回目以降」を入れてください");
+  });
+
+  it("requires applied-person ticket names to use the unified wording", () => {
+    const event: EventInfo = {
+      name: "オンライン読書会",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 14, 20, 0),
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "通常チケット 今月1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "猫町スクールにお申し込みいただいた方 今月1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    expect(checkEventInfo(event, rulesConfig).errors.some((error) => error.includes("特殊申込済みチケット名は「お申し込み済みの方」に統一してください"))).toBe(true);
   });
 
   it("ignores already-applied tickets in duplicate checks", () => {
@@ -220,15 +424,15 @@ describe("event checks", () => {
       endAt: null,
       venue: null,
       tickets: [
-        { name: "通常チケット 1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
-        { name: "猫町スクールにお申し込み済みの方 1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+        { name: "通常チケット 今月1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "猫町スクールにお申し込み済みの方 今月1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
     expect(checkEventInfo(event, rulesConfig).errors).not.toContain("チケット「オンライン会員 1回目」が複数存在します");
   });
 
-  it("ignores applied-person tickets in price checks", () => {
+  it("does not ignore old applied-person wording in price checks", () => {
     const event: EventInfo = {
       name: "オンライン読書会",
       kind: "online",
@@ -237,12 +441,12 @@ describe("event checks", () => {
       endAt: null,
       venue: null,
       tickets: [
-        { name: "猫町スクールにお申し込みいただいた方 1回目", price: 500, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
-        { name: "通常チケット 1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+        { name: "猫町スクールにお申し込みいただいた方 今月1回目", price: 500, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "通常チケット 今月1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
-    expect(checkEventInfo(event, rulesConfig).errors.some((error) => error.includes("[1番目]") && error.includes("金額が期待値と異なります"))).toBe(false);
+    expect(checkEventInfo(event, rulesConfig).errors.some((error) => error.includes("[1番目]") && error.includes("金額が期待値と異なります"))).toBe(true);
   });
 
   it("ignores already-applied tickets in price checks", () => {
@@ -254,15 +458,15 @@ describe("event checks", () => {
       endAt: null,
       venue: null,
       tickets: [
-        { name: "猫町スクールにお申し込み済みの方 1回目", price: 500, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
-        { name: "通常チケット 1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+        { name: "猫町スクールにお申し込み済みの方 今月1回目", price: 500, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "通常チケット 今月1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
     expect(checkEventInfo(event, rulesConfig).errors.some((error) => error.includes("[1番目]") && error.includes("金額が期待値と異なります"))).toBe(false);
   });
 
-  it("treats events with only applied-person tickets like free single-ticket events", () => {
+  it("treats all-applied-person events like fixed-fee events without regular plan checks", () => {
     const event: EventInfo = {
       name: "オンライン読書会",
       kind: "online",
@@ -276,7 +480,10 @@ describe("event checks", () => {
       ]
     };
 
-    expect(checkEventInfo(event, rulesConfig).ok).toBe(true);
+    const errors = checkEventInfo(event, rulesConfig).errors;
+    expect(errors.some((error) => error.includes("期待されるチケット"))).toBe(false);
+    expect(errors.some((error) => error.includes("オンライン参加URLが空"))).toBe(false);
+    expect(errors.some((error) => error.includes("金額が期待値と異なります"))).toBe(false);
   });
 
   it("requires a free operation member ticket for beginner events", () => {
@@ -288,7 +495,7 @@ describe("event checks", () => {
       endAt: null,
       venue: null,
       tickets: [
-        { name: "通常チケット 1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+        { name: "通常チケット 今月1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
@@ -304,16 +511,16 @@ describe("event checks", () => {
       endAt: null,
       venue: null,
       tickets: [
-        { name: "通常チケット 1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "通常チケット 今月1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
         { name: "運営メンバー", price: 500, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
-        { name: "プラン変更後にお申込みください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+        { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
     expect(checkEventInfo(event, rulesConfig).errors).toContain("[2番目] 「運営メンバー」チケットは無料である必要があります。実際: 500円");
   });
 
-  it("excludes operation member tickets from plan and online field checks", () => {
+  it("excludes operation member tickets from plan checks but checks online URL and notices", () => {
     const event: EventInfo = {
       name: "初心者読書会",
       kind: "online",
@@ -322,35 +529,34 @@ describe("event checks", () => {
       endAt: null,
       venue: null,
       tickets: [
-        { name: "通常チケット 1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "通常チケット 今月1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
         { name: "運営メンバー", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: true, onlineUrl: null, organizerNotice: "別のお知らせ" },
-        { name: "プラン変更後にお申込みください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+        { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
     const errors = checkEventInfo(event, rulesConfig).errors;
     expect(errors.some((error) => error.includes("期待ルールに一致しないチケット名") && error.includes("運営メンバー"))).toBe(false);
-    expect(errors.some((error) => error.includes("運営メンバー") && error.includes("オンライン参加URLが空"))).toBe(false);
-    expect(errors.some((error) => error.includes("主催者からのお知らせがチケット間で一致していません"))).toBe(false);
+    expect(errors.some((error) => error.includes("運営メンバー") && error.includes("オンライン参加URLが空"))).toBe(true);
+    expect(errors.some((error) => error.includes("主催者からのお知らせがチケット間で一致していません"))).toBe(true);
+    expect(errors.some((error) => error.includes("運営メンバー") && error.includes("締切時刻が開始5分前ではありません"))).toBe(true);
   });
 
-  it("requires applied-person-only events to be free", () => {
+  it("requires fixed-fee two-ticket events to include a plan-change ticket", () => {
     const event: EventInfo = {
-      name: "オンライン読書会",
-      kind: "online",
+      name: "【名古屋】講座",
+      kind: "offline",
       detailUrl: "https://example.com",
-      startAt: new Date(2026, 6, 14, 20, 0),
+      startAt: null,
       endAt: null,
       venue: null,
       tickets: [
-        { name: "大阪会場で全6回にお申し込み済みの方", price: 500, visibility: null, visibilityTags: ["オン", "オフ", "ハイ", "外", "A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
-        { name: "オンラインで全6回にお申し込み済みの方", price: 0, visibility: null, visibilityTags: ["オン", "オフ", "ハイ", "外", "A", "U-22", "B"], onlineEnabled: true, onlineUrl: null, organizerNotice: null }
+        { name: "固定費チケット", price: 1500, visibility: "全員", visibilityTags: ["オン", "オフ", "ハイ", "外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "追加チケット", price: 0, visibility: "全員", visibilityTags: ["オン", "オフ", "ハイ", "外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
-    expect(checkEventInfo(event, rulesConfig).errors).toEqual([
-      "[1番目] 特殊申込済みチケットのみのイベントは無料である必要があります。実際: 500円"
-    ]);
+    expect(checkEventInfo(event, rulesConfig).errors).toContain("固定費イベントでは、片方がプラン変更チケットである必要があります");
   });
 
   it("accepts a fixed-fee ticket plus plan-change ticket without normal plan rules", () => {
@@ -363,7 +569,7 @@ describe("event checks", () => {
       venue: null,
       tickets: [
         { name: "固定費チケット", price: 1500, visibility: "全員", visibilityTags: ["オン", "オフ", "ハイ", "外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
-        { name: "プラン変更後にお申し込み下さい。（プラン変更前は参加ボタンは押さないでください）", price: 0, visibility: "(1)【5月まで】ラウンジ会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+        { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "(1)【5月まで】ラウンジ会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
@@ -380,7 +586,7 @@ describe("event checks", () => {
       venue: null,
       tickets: [
         { name: "固定費チケット", price: 1500, visibility: "一部会員", visibilityTags: ["オン", "オフ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
-        { name: "プラン変更後にお申し込み下さい。（プラン変更前は参加ボタンは押さないでください）", price: 0, visibility: "(1)【5月まで】ラウンジ会員", visibilityTags: ["(1)【5月まで】ラウンジ会員"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+        { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "(1)【5月まで】ラウンジ会員", visibilityTags: ["(1)【5月まで】ラウンジ会員"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
@@ -399,7 +605,7 @@ describe("event checks", () => {
         { name: "読書会のみ参加 旧会員1", price: 1800, visibility: null, visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
         { name: "読書会のみ参加 旧会員2", price: 1800, visibility: null, visibilityTags: ["A"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
         { name: "懇親会まで参加 旧会員", price: 1800, visibility: null, visibilityTags: ["A"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
-        { name: "プラン変更後にお申し込み下さい。", price: 0, visibility: "(1)【5月まで】ラウンジ会員", visibilityTags: ["A"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+        { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "(1)【5月まで】ラウンジ会員", visibilityTags: ["A"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
@@ -416,7 +622,7 @@ describe("event checks", () => {
       venue: null,
       tickets: [
         { name: "固定費チケット", price: 1500, visibility: "旧会員混入", visibilityTags: ["オン", "オフ", "ハイ", "外", "A"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
-        { name: "プラン変更後にお申込みください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+        { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
@@ -434,14 +640,14 @@ describe("event checks", () => {
       endAt: null,
       venue: null,
       tickets: [
-        { name: "通常チケット 1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "通常チケット 今月1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
         { name: "プラン切り替え後にお申し込み下さい。（切り替え前は参加ボタンを押さないでください）", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
     const errors = checkEventInfo(event, rulesConfig).errors;
     expect(errors.some((error) => error.includes("期待ルールに一致しないチケット名"))).toBe(false);
-    expect(errors.some((error) => error.includes("期待されるチケット「プラン変更後にお申し込み下さい。"))).toBe(false);
+    expect(errors.some((error) => error.includes("プラン変更チケット名は"))).toBe(true);
   });
 
   it("uses guest offline prices for guest events", () => {
@@ -457,11 +663,61 @@ describe("event checks", () => {
         { name: "懇親会まで参加", price: 3500, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
         { name: "読書会のみ参加（今月1回目）", price: 800, visibility: null, visibilityTags: ["オフ", "ハイ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
         { name: "懇親会まで参加（今月1回目）", price: 800, visibility: null, visibilityTags: ["オフ", "ハイ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
-        { name: "読書会のみ参加（今月2回目）", price: 3000, visibility: null, visibilityTags: ["オフ", "ハイ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
-        { name: "懇親会まで参加（今月2回目）", price: 3000, visibility: null, visibilityTags: ["オフ", "ハイ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "読書会のみ参加（今月2回目以降）", price: 3000, visibility: null, visibilityTags: ["オフ", "ハイ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "懇親会まで参加（今月2回目以降）", price: 3000, visibility: null, visibilityTags: ["オフ", "ハイ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
         { name: "読書会のみ参加", price: 3000, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
         { name: "懇親会まで参加", price: 3000, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
-        { name: "プラン変更後にお申込みください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+        { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    const errors = checkEventInfo(event, rulesConfig).errors;
+    expect(errors.filter((error) => error.includes("金額が期待値と異なります"))).toEqual([]);
+  });
+
+  it("uses guest online prices for online guest events", () => {
+    const notice = "19:55までに参加してください";
+    const event: EventInfo = {
+      name: "ゲストと読む『茶の本』オンライン読書会",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 14, 20, 0),
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "オンライン会員（今月1回目）", price: 550, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: notice },
+        { name: "地域会員・オンライン会員（今月2回目以降）", price: 1200, visibility: null, visibilityTags: ["オフ", "オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: notice },
+        { name: "ハイブリッド会員", price: 550, visibility: null, visibilityTags: ["ハイ"], onlineEnabled: false, onlineUrl: null, organizerNotice: notice },
+        { name: "非会員", price: 1500, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: notice },
+        { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    const errors = checkEventInfo(event, rulesConfig).errors;
+    expect(errors.filter((error) => error.includes("金額が期待値と異なります"))).toEqual([]);
+    expect(errors.filter((error) => error.includes("期待されるチケット"))).toEqual([]);
+    expect(errors.filter((error) => error.includes("チケット名の会員名が閲覧権限と一致していません"))).toEqual([]);
+    expect(errors.filter((error) => error.includes("チケット「地域会員」が複数存在します"))).toEqual([]);
+  });
+
+  it("accepts alternate guest offline prices", () => {
+    const event: EventInfo = {
+      name: "【福岡 第一回】ゲストさんと読む『茶の本』",
+      kind: "offline",
+      detailUrl: "https://example.com",
+      startAt: null,
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "読書会のみ参加", price: 2800, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "懇親会まで参加", price: 2800, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "読書会のみ参加（今月1回目）", price: 500, visibility: null, visibilityTags: ["オフ", "ハイ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "懇親会まで参加（今月1回目）", price: 500, visibility: null, visibilityTags: ["オフ", "ハイ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "読書会のみ参加（今月2回目以降）", price: 2300, visibility: null, visibilityTags: ["オフ", "ハイ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "懇親会まで参加（今月2回目以降）", price: 2300, visibility: null, visibilityTags: ["オフ", "ハイ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "読書会のみ参加", price: 2300, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "懇親会まで参加", price: 2300, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
