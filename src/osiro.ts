@@ -9,6 +9,8 @@ type RawAdminEventFormData = {
   startAtText: string | null;
   endAtText: string | null;
   venue: string | null;
+  applicationDeadlineEnabled: boolean | null;
+  applicationDeadline: string | null;
   tickets: {
     name: string;
     priceText: string;
@@ -57,6 +59,8 @@ export async function fetchEventInfo(context: BrowserContext, item: EventListIte
     const endText = formData.endAtText || (await getFieldText(page, ["終了日時", "終了日"]));
     const tickets = formData.tickets.length > 0 ? formData.tickets : await collectTickets(page);
     const venue = formData.venue || await getFieldText(page, ["会場"]);
+    const applicationDeadlineEnabled = formData.applicationDeadlineEnabled ?? await getBooleanField(page, ["締切を設定する"]);
+    const applicationDeadline = formData.applicationDeadline || await getFieldText(page, ["申込締切", "申し込み締切", "申込み締切"]);
     return {
       name,
       kind: classifyEventKind(name || item.name, venue),
@@ -64,6 +68,8 @@ export async function fetchEventInfo(context: BrowserContext, item: EventListIte
       startAt: startText ? parseJapaneseDateTime(startText) : null,
       endAt: endText ? parseJapaneseDateTime(endText) : null,
       venue,
+      applicationDeadlineEnabled,
+      applicationDeadline,
       tickets
     };
   } finally {
@@ -87,6 +93,8 @@ async function extractAdminEventFormData(page: Page): Promise<{
   startAtText: string | null;
   endAtText: string | null;
   venue: string | null;
+  applicationDeadlineEnabled: boolean | null;
+  applicationDeadline: string | null;
   tickets: TicketInfo[];
 }> {
   const raw = await page.evaluate(`(() => {
@@ -96,6 +104,11 @@ async function extractAdminEventFormData(page: Page): Promise<{
       if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return el.value;
       return "";
     };
+    const labelTextOf = (el) => {
+      const id = el.getAttribute("id") ?? "";
+      const explicitLabel = id ? document.querySelector(\`label[for="\${CSS.escape(id)}"]\`) : null;
+      return (el.closest("label, tr")?.textContent ?? explicitLabel?.textContent ?? "").trim();
+    };
     const controlInfo = controls.map((el, index) => ({
       index,
       tag: el.tagName.toLowerCase(),
@@ -104,12 +117,17 @@ async function extractAdminEventFormData(page: Page): Promise<{
       id: el.getAttribute("id") ?? "",
       placeholder: el.getAttribute("placeholder") ?? "",
       value: valueOf(el),
+      labelText: labelTextOf(el),
       checked: el instanceof HTMLInputElement ? el.checked : false
     }));
 
     const title = controlInfo.find((control) => control.id === "title")?.value ?? null;
     const datetimes = controlInfo.filter((control) => control.type === "datetime-local").map((control) => control.value);
     const venue = controlInfo.find((control) => control.id === "editEvent_venue")?.value ?? null;
+    const applicationDeadlineEnabled = controlInfo.find((control) => control.id === "editEvent_reservation")?.checked ?? null;
+    const applicationDeadline = controlInfo.find((control) => /申込締切|申し込み締切|申込み締切/.test([control.name, control.id, control.placeholder, control.labelText].join(" ")))?.value
+      ?? datetimes[2]
+      ?? null;
     const ticketNameIndexes = controlInfo
       .filter((control) => control.name === "event_ticket_name")
       .map((control) => control.index);
@@ -140,6 +158,8 @@ async function extractAdminEventFormData(page: Page): Promise<{
       startAtText: datetimes[0] ?? null,
       endAtText: datetimes[1] ?? null,
       venue,
+      applicationDeadlineEnabled,
+      applicationDeadline,
       tickets
     };
   })()`) as RawAdminEventFormData;
@@ -149,6 +169,8 @@ async function extractAdminEventFormData(page: Page): Promise<{
     startAtText: raw.startAtText,
     endAtText: raw.endAtText,
     venue: raw.venue,
+    applicationDeadlineEnabled: raw.applicationDeadlineEnabled,
+    applicationDeadline: raw.applicationDeadline,
     tickets: raw.tickets.map((ticket) => ({
       name: ticket.name,
       price: normalizePriceText(ticket.priceText),
@@ -216,7 +238,7 @@ async function getFieldText(scope: Page | Locator, labels: string[]): Promise<st
   return null;
 }
 
-async function getBooleanField(scope: Locator, labels: string[]): Promise<boolean | null> {
+async function getBooleanField(scope: Page | Locator, labels: string[]): Promise<boolean | null> {
   for (const label of labels) {
     const labelNode = scope.getByText(label, { exact: false }).first();
     if ((await labelNode.count()) === 0) continue;

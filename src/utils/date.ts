@@ -16,6 +16,25 @@ export function isDeadlineFiveMinutesBeforeStart(startAt: Date, deadlineText: st
   return deadline === formatHourMinute(expected);
 }
 
+export function parseApplicationDeadlineDate(text: string, eventStartAt: Date): Date | null {
+  const normalized = toHalfWidthDigits(text).replace(/：/g, ":");
+  const match = normalized.match(/(?:(\d{4})[\/年.-]\s*)?(\d{1,2})[\/月.-]\s*(\d{1,2})日?/);
+  if (!match) return null;
+  const [, year, month, day] = match;
+  return new Date(year ? Number(year) : eventStartAt.getFullYear(), Number(month) - 1, Number(day));
+}
+
+export function isApplicationDeadlineWithinEventRange(eventStartAt: Date, deadlineText: string): boolean {
+  const deadline = parseApplicationDeadlineDate(deadlineText, eventStartAt);
+  if (!deadline) return false;
+
+  const eventDate = startOfLocalDate(eventStartAt);
+  const earliest = new Date(eventDate);
+  earliest.setDate(earliest.getDate() - 3);
+  const deadlineDate = startOfLocalDate(deadline);
+  return deadlineDate.getTime() >= earliest.getTime() && deadlineDate.getTime() <= eventDate.getTime();
+}
+
 export function formatHourMinute(date: Date): string {
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
@@ -31,4 +50,8 @@ export function parseJapaneseDateTime(text: string): Date | null {
   if (!match) return null;
   const [, year, month, day, hour, minute] = match;
   return new Date(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute));
+}
+
+function startOfLocalDate(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
 }

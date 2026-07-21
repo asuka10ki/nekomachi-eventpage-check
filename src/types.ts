@@ -12,6 +12,8 @@ export type EventInfo = {
   startAt: Date | null;
   endAt: Date | null;
   venue: string | null;
+  applicationDeadlineEnabled?: boolean | null;
+  applicationDeadline?: string | null;
   tickets: TicketInfo[];
 };
 

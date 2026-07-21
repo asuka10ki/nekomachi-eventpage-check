@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { CheckResult, EventInfo, RulesConfig, TicketInfo, TicketRule } from "./types.js";
 import { formatHourMinute } from "./utils/date.js";
-import { extractDeadlineTimeFromNotice, isDeadlineFiveMinutesBeforeStart } from "./utils/date.js";
+import { extractDeadlineTimeFromNotice, isApplicationDeadlineWithinEventRange, isDeadlineFiveMinutesBeforeStart, parseApplicationDeadlineDate } from "./utils/date.js";
 import { normalizeCommonText, normalizeNoticeText, normalizeTicketText } from "./utils/normalize.js";
 import { classifyTicketRulesByInfo, containsAllTags, sameTagSet, validateTicketNameBookTitle, validateTicketNameMemberLabel } from "./utils/ticket.js";
 import { normalizeOnlineUrl, safeFileName } from "./utils/url.js";
@@ -19,12 +19,9 @@ export function checkEventInfo(event: EventInfo, rulesConfig: RulesConfig): Chec
   event.tickets.forEach((ticket, index) => ticketIndexes.set(ticket, index + 1));
   validateOperationMemberTicket(event, errors, ticketIndexes);
   validateAppliedPersonTicketNames(event.tickets, errors, ticketIndexes);
+  validateApplicationDeadline(event, errors);
 
-  if (event.tickets.length === 1) {
-    const onlyTicket = event.tickets[0];
-    if (!isAppliedPersonTicket(onlyTicket) && onlyTicket.price !== 0) {
-      errors.push(`チケットが1つだけのイベントは無料である必要があります。実際: ${onlyTicket.price ?? "取得できません"}円`);
-    }
+  if (areAllAppliedPersonTickets(event.tickets)) {
     return {
       eventName: event.name,
       kind: event.kind,
@@ -35,7 +32,30 @@ export function checkEventInfo(event: EventInfo, rulesConfig: RulesConfig): Chec
     };
   }
 
-  if (areAllAppliedPersonTickets(event.tickets)) {
+  if (runsOnlineChecks(event) && isAllSessionOnlineEvent(event.tickets)) {
+    const allSessionTickets = event.tickets.filter((ticket) => !isPlanChangeTicket(ticket));
+    const planChangeTickets = event.tickets.filter((ticket) => isPlanChangeTicket(ticket));
+    validateAllSessionOnlineTickets(allSessionTickets, errors, ticketIndexes);
+    if (planChangeTickets.length > 0) {
+      validatePlanChangeTicket(planChangeTickets, errors, ticketIndexes);
+    }
+    validateLegacyMemberDuplicates(event, errors, ticketIndexes);
+    validateOnlineFields(event, errors, ticketIndexes);
+    return {
+      eventName: event.name,
+      kind: event.kind,
+      detailUrl: event.detailUrl,
+      startAt: event.startAt,
+      ok: errors.length === 0,
+      errors
+    };
+  }
+
+  if (event.tickets.length === 1) {
+    const onlyTicket = event.tickets[0];
+    if (!isAppliedPersonTicket(onlyTicket) && onlyTicket.price !== 0) {
+      errors.push(`チケットが1つだけのイベントは無料である必要があります。実際: ${onlyTicket.price ?? "取得できません"}円`);
+    }
     return {
       eventName: event.name,
       kind: event.kind,
@@ -209,6 +229,23 @@ function validateOnlineFields(event: EventInfo, errors: string[], ticketIndexes:
   }
 }
 
+function validateApplicationDeadline(event: EventInfo, errors: string[]): void {
+  if (!("applicationDeadline" in event)) return;
+  if (event.applicationDeadlineEnabled === false) return;
+  const deadline = event.applicationDeadline ?? "";
+  if (!event.startAt) {
+    errors.push("開催日時を取得できないため申込締切日を確認できません");
+    return;
+  }
+  const parsed = parseApplicationDeadlineDate(deadline, event.startAt);
+  if (!parsed || !isApplicationDeadlineWithinEventRange(event.startAt, deadline)) {
+    const eventDate = new Date(event.startAt.getFullYear(), event.startAt.getMonth(), event.startAt.getDate());
+    const earliest = new Date(eventDate);
+    earliest.setDate(earliest.getDate() - 3);
+    errors.push(`申込締切日は開催日の3日前から開催日までにしてください。期待: ${formatDate(earliest)}〜${formatDate(eventDate)} / 実際: ${deadline || "取得できません"}`);
+  }
+}
+
 function ticketRuleLabel(rule: TicketRule): string {
   return [rule.name, rule.note].filter(Boolean).join(" ");
 }
@@ -321,11 +358,57 @@ function isExcludedFromDuplicateCheck(ticket: TicketInfo): boolean {
 }
 
 function isExcludedFromPriceCheck(ticket: TicketInfo): boolean {
-  return isAppliedPersonTicket(ticket);
+  return isAppliedPersonTicket(ticket) || isAllSessionsTicket(ticket);
 }
 
 function isAppliedPersonTicket(ticket: TicketInfo): boolean {
   return /お申し込み済みの方/.test(ticket.name);
+}
+
+function isAllSessionsTicket(ticket: TicketInfo): boolean {
+  return /全\s*\d+\s*回/.test(normalizeTicketText(ticket.name));
+}
+
+function areAllSessionTickets(tickets: TicketInfo[]): boolean {
+  return tickets.length > 0 && tickets.every((ticket) => isAllSessionsTicket(ticket));
+}
+
+function isAllSessionOnlineEvent(tickets: TicketInfo[]): boolean {
+  const nonPlanChangeTickets = tickets.filter((ticket) => !isPlanChangeTicket(ticket));
+  return areAllSessionTickets(nonPlanChangeTickets);
+}
+
+function validateAllSessionOnlineTickets(tickets: TicketInfo[], errors: string[], ticketIndexes: Map<TicketInfo, number>): void {
+  const expectedPlans = [
+    { tag: "オン", label: "オンライン会員" },
+    { tag: "オフ", label: "地域会員" },
+    { tag: "ハイ", label: "ハイブリッド会員" },
+    { tag: "外", label: "非会員" }
+  ];
+
+  for (const plan of expectedPlans) {
+    const matchedTickets = tickets.filter((ticket) => ticket.visibilityTags.includes(plan.tag));
+    if (matchedTickets.length === 0) {
+      errors.push(`全N回チケットには「${plan.label}」のチケットが1つ必要です`);
+    }
+    if (matchedTickets.length > 1 && !isAllowedAllSessionDuplicate(plan.tag, matchedTickets)) {
+      errors.push(`全N回チケット「${plan.label}」が複数存在します: ${matchedTickets.map((ticket) => `${ticketPosition(ticket, ticketIndexes)}「${ticket.name}」`).join(" / ")}`);
+    }
+  }
+
+  for (const ticket of tickets) {
+    const knownTags = ticket.visibilityTags.filter((tag) => expectedPlans.some((plan) => plan.tag === tag));
+    if (knownTags.length === 0 || knownTags.length !== ticket.visibilityTags.length) {
+      errors.push(`${ticketPosition(ticket, ticketIndexes)}全N回チケットの販売対象者が期待値と異なります。期待: オン または オフ または ハイ または 外 / 実際: ${ticket.visibilityTags.join(",") || "取得できません"}`);
+    }
+  }
+}
+
+function isAllowedAllSessionDuplicate(tag: string, tickets: TicketInfo[]): boolean {
+  if (tag !== "外" || tickets.length !== 2) return false;
+  const hasFirstTime = tickets.some((ticket) => isFirstTimeTicket(ticket));
+  const hasRegular = tickets.some((ticket) => !isFirstTimeTicket(ticket));
+  return hasFirstTime && hasRegular;
 }
 
 function validateAppliedPersonTicketNames(tickets: TicketInfo[], errors: string[], ticketIndexes: Map<TicketInfo, number>): void {
@@ -493,4 +576,8 @@ function groupTicketsByNormalizedNotice(tickets: TicketInfo[]): { notice: string
     groups.set(notice, [...(groups.get(notice) ?? []), ticket]);
   }
   return [...groups.entries()].map(([notice, groupTickets]) => ({ notice, tickets: groupTickets }));
+}
+
+function formatDate(date: Date): string {
+  return `${date.getFullYear()}/${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}`;
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { classifyEventByName } from "../src/utils/classify.js";
-import { extractDeadlineTimeFromNotice, isDeadlineFiveMinutesBeforeStart } from "../src/utils/date.js";
+import { extractDeadlineTimeFromNotice, isApplicationDeadlineWithinEventRange, isDeadlineFiveMinutesBeforeStart } from "../src/utils/date.js";
 import { normalizePriceText, normalizeTicketText, normalizeVisibilityTags } from "../src/utils/normalize.js";
 import { normalizeOnlineUrl } from "../src/utils/url.js";
 import { classifyTicketRulesByInfo, extractBookTitle, validateTicketNameBookTitle, validateTicketNameMemberLabel } from "../src/utils/ticket.js";
@@ -100,6 +100,14 @@ describe("deadline", () => {
     const startAt = new Date(2026, 6, 22, 20, 30);
     expect(isDeadlineFiveMinutesBeforeStart(startAt, "20:25までに")).toBe(true);
     expect(isDeadlineFiveMinutesBeforeStart(startAt, "20:30までに")).toBe(false);
+  });
+
+  it("checks application deadline date range", () => {
+    const startAt = new Date(2026, 6, 22, 20, 30);
+    expect(isApplicationDeadlineWithinEventRange(startAt, "申込締切：2026/07/19 23:59")).toBe(true);
+    expect(isApplicationDeadlineWithinEventRange(startAt, "申込締切：7/22 12:00")).toBe(true);
+    expect(isApplicationDeadlineWithinEventRange(startAt, "申込締切：2026/07/18 23:59")).toBe(false);
+    expect(isApplicationDeadlineWithinEventRange(startAt, "申込締切：2026/07/23 00:00")).toBe(false);
   });
 });
 
@@ -398,6 +406,45 @@ describe("event checks", () => {
     expect(errors).toContain("[2番目] チケット「オンライン会員 2回目以降」: 2回目以降チケット名には「今月2回目以降」を入れてください");
   });
 
+  it("requires application deadline dates to be between three days before and the event date", () => {
+    const event: EventInfo = {
+      name: "オンライン読書会",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 22, 20, 0),
+      endAt: null,
+      venue: null,
+      applicationDeadline: "申込締切：2026/07/18 23:59",
+      tickets: [
+        { name: "通常チケット 今月1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    const errors = checkEventInfo(event, rulesConfig).errors;
+    expect(errors).toContain("申込締切日は開催日の3日前から開催日までにしてください。期待: 2026/07/19〜2026/07/22 / 実際: 申込締切：2026/07/18 23:59");
+  });
+
+  it("skips application deadline checks when deadline setting is off", () => {
+    const event: EventInfo = {
+      name: "オンライン読書会",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 22, 20, 0),
+      endAt: null,
+      venue: null,
+      applicationDeadlineEnabled: false,
+      applicationDeadline: null,
+      tickets: [
+        { name: "通常チケット 今月1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    const errors = checkEventInfo(event, rulesConfig).errors;
+    expect(errors.some((error) => error.includes("申込締切日は"))).toBe(false);
+  });
+
   it("requires applied-person ticket names to use the unified wording", () => {
     const event: EventInfo = {
       name: "オンライン読書会",
@@ -464,6 +511,90 @@ describe("event checks", () => {
     };
 
     expect(checkEventInfo(event, rulesConfig).errors.some((error) => error.includes("[1番目]") && error.includes("金額が期待値と異なります"))).toBe(false);
+  });
+
+  it("ignores all-session tickets in price checks", () => {
+    const event: EventInfo = {
+      name: "オンライン読書会",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 14, 20, 0),
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "全6回チケット 今月1回目", price: 5000, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    expect(checkEventInfo(event, rulesConfig).errors.some((error) => error.includes("[1番目]") && error.includes("金額が期待値と異なります"))).toBe(false);
+  });
+
+  it("uses all-session online ticket requirements when every ticket is an all-session ticket", () => {
+    const notice = "19:55までに参加してください";
+    const event: EventInfo = {
+      name: "オンライン全6回講座",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 14, 20, 0),
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "全6回 オンライン会員・ハイブリッド会員", price: 5000, visibility: null, visibilityTags: ["オン", "ハイ"], onlineEnabled: false, onlineUrl: null, organizerNotice: notice },
+        { name: "全6回 地域会員", price: 5000, visibility: null, visibilityTags: ["オフ"], onlineEnabled: false, onlineUrl: null, organizerNotice: notice },
+        { name: "全6回 非会員", price: 5000, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: notice },
+        { name: "🔰初参加 全6回 非会員", price: 5000, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: notice }
+      ]
+    };
+
+    const errors = checkEventInfo(event, rulesConfig).errors;
+    expect(errors).toEqual([]);
+  });
+
+  it("treats online events as all-session events when only the plan-change ticket is not all-session", () => {
+    const notice = "19:55までに参加してください";
+    const event: EventInfo = {
+      name: "オンライン全6回講座",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 14, 20, 0),
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "全6回 オンライン会員・ハイブリッド会員", price: 5000, visibility: null, visibilityTags: ["オン", "ハイ"], onlineEnabled: false, onlineUrl: null, organizerNotice: notice },
+        { name: "全6回 地域会員", price: 5000, visibility: null, visibilityTags: ["オフ"], onlineEnabled: false, onlineUrl: null, organizerNotice: notice },
+        { name: "全6回 非会員", price: 5000, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: notice },
+        { name: "🔰初参加 全6回 非会員", price: 5000, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: notice },
+        { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    const errors = checkEventInfo(event, rulesConfig).errors;
+    expect(errors.some((error) => error.includes("期待されるチケット"))).toBe(false);
+    expect(errors.some((error) => error.includes("販売対象者が期待値と異なります"))).toBe(false);
+  });
+
+  it("requires every member plan once when every ticket is an all-session ticket", () => {
+    const event: EventInfo = {
+      name: "オンライン全6回講座",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 14, 20, 0),
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "全6回 オンライン会員", price: 5000, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "全6回 地域会員A", price: 5000, visibility: null, visibilityTags: ["オフ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "全6回 地域会員B", price: 5000, visibility: null, visibilityTags: ["オフ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "全6回 非会員", price: 5000, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    const errors = checkEventInfo(event, rulesConfig).errors;
+    expect(errors).toContain("全N回チケットには「ハイブリッド会員」のチケットが1つ必要です");
+    expect(errors.some((error) => error.includes("全N回チケット「地域会員」が複数存在します"))).toBe(true);
+    expect(errors.some((error) => error.includes("期待されるチケット"))).toBe(false);
+    expect(errors.some((error) => error.includes("プラン変更後にお申し込み下さい"))).toBe(false);
   });
 
   it("treats all-applied-person events like fixed-fee events without regular plan checks", () => {
