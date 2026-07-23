@@ -9,6 +9,23 @@ export function extractDeadlineTimeFromNotice(text: string): string | null {
   return null;
 }
 
+export function extractReceptionStartTimeFromBody(text: string): string | null {
+  const normalized = normalizeTimeText(text);
+  return extractExplicitReceptionStartTime(normalized, true);
+}
+
+export function extractReceptionStartTimeFromNotice(text: string, eventStartAt: Date | null): string | null {
+  const normalized = normalizeTimeText(text);
+  const explicit = extractExplicitReceptionStartTime(normalized, false);
+  if (explicit) return explicit;
+
+  const relativeMatch = normalized.match(/(?:読書会|イベント)?\s*(?:スタート|開始)\s*(\d{1,3})\s*分前\s*から\s*受付/);
+  if (!relativeMatch || !eventStartAt) return null;
+
+  const receptionStart = new Date(eventStartAt.getTime() - Number(relativeMatch[1]) * 60 * 1000);
+  return formatHourMinute(receptionStart);
+}
+
 export function isDeadlineFiveMinutesBeforeStart(startAt: Date, deadlineText: string): boolean {
   const deadline = extractDeadlineTimeFromNotice(deadlineText);
   if (!deadline) return false;
@@ -54,4 +71,32 @@ export function parseJapaneseDateTime(text: string): Date | null {
 
 function startOfLocalDate(date: Date): Date {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function normalizeTimeText(text: string): string {
+  return toHalfWidthDigits(text).replace(/：/g, ":").replace(/\s+/g, " ");
+}
+
+function extractExplicitReceptionStartTime(text: string, allowPlainStart: boolean): string | null {
+  const patterns = allowPlainStart
+    ? [
+        /(\d{1,2}):(\d{2})\s*(?:受付\s*開始|受付開始)/,
+        /(\d{1,2})時\s*(\d{1,2})?\s*分?\s*(?:受付\s*開始|受付開始)/,
+        /(?:受付\s*開始|受付開始)\s*[:：]?\s*(\d{1,2}):(\d{2})/,
+        /(?:受付\s*開始|受付開始)\s*[:：]?\s*(\d{1,2})時\s*(\d{1,2})?\s*分?/
+      ]
+    : [
+        /(\d{1,2}):(\d{2})\s*(?:から|より)\s*受付(?:を)?(?:開始|オープン)?/,
+        /(\d{1,2})時\s*(\d{1,2})?\s*分?\s*(?:から|より)\s*受付(?:を)?(?:開始|オープン)?/,
+        /(\d{1,2}):(\d{2})\s*受付(?:を)?(?:開始|オープン)/,
+        /(\d{1,2})時\s*(\d{1,2})?\s*分?\s*受付(?:を)?(?:開始|オープン)/,
+        /(?:受付(?:を)?(?:開始|オープン)|受付\s*開始|受付開始)\s*[:：]?\s*(\d{1,2}):(\d{2})/,
+        /(?:受付(?:を)?(?:開始|オープン)|受付\s*開始|受付開始)\s*[:：]?\s*(\d{1,2})時\s*(\d{1,2})?\s*分?/
+      ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) return `${match[1].padStart(2, "0")}:${(match[2] ?? "0").padStart(2, "0")}`;
+  }
+  return null;
 }

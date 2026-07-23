@@ -9,6 +9,7 @@ type RawAdminEventFormData = {
   startAtText: string | null;
   endAtText: string | null;
   venue: string | null;
+  bodyText: string | null;
   applicationDeadlineEnabled: boolean | null;
   applicationDeadline: string | null;
   tickets: {
@@ -68,6 +69,7 @@ export async function fetchEventInfo(context: BrowserContext, item: EventListIte
       startAt: startText ? parseJapaneseDateTime(startText) : null,
       endAt: endText ? parseJapaneseDateTime(endText) : null,
       venue,
+      bodyText: formData.bodyText,
       applicationDeadlineEnabled,
       applicationDeadline,
       tickets
@@ -93,6 +95,7 @@ async function extractAdminEventFormData(page: Page): Promise<{
   startAtText: string | null;
   endAtText: string | null;
   venue: string | null;
+  bodyText: string | null;
   applicationDeadlineEnabled: boolean | null;
   applicationDeadline: string | null;
   tickets: TicketInfo[];
@@ -124,6 +127,17 @@ async function extractAdminEventFormData(page: Page): Promise<{
     const title = controlInfo.find((control) => control.id === "title")?.value ?? null;
     const datetimes = controlInfo.filter((control) => control.type === "datetime-local").map((control) => control.value);
     const venue = controlInfo.find((control) => control.id === "editEvent_venue")?.value ?? null;
+    const htmlToText = (html) => {
+      const container = document.createElement("div");
+      container.innerHTML = String(html)
+        .replace(/<br\\s*\\/?>/gi, "\\n")
+        .replace(/<\\/(p|div|li|h[1-6]|tr)>/gi, "\\n");
+      return (container.textContent ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+    };
+    const bodyHtml = controlInfo.find((control) => control.name === "body")?.value
+      ?? controlInfo.find((control) => control.name === "content")?.value
+      ?? null;
+    const bodyText = bodyHtml ? htmlToText(bodyHtml) : null;
     const applicationDeadlineEnabled = controlInfo.find((control) => control.id === "editEvent_reservation")?.checked ?? null;
     const applicationDeadline = controlInfo.find((control) => /申込締切|申し込み締切|申込み締切/.test([control.name, control.id, control.placeholder, control.labelText].join(" ")))?.value
       ?? datetimes[2]
@@ -158,6 +172,7 @@ async function extractAdminEventFormData(page: Page): Promise<{
       startAtText: datetimes[0] ?? null,
       endAtText: datetimes[1] ?? null,
       venue,
+      bodyText,
       applicationDeadlineEnabled,
       applicationDeadline,
       tickets
@@ -169,6 +184,7 @@ async function extractAdminEventFormData(page: Page): Promise<{
     startAtText: raw.startAtText,
     endAtText: raw.endAtText,
     venue: raw.venue,
+    bodyText: raw.bodyText,
     applicationDeadlineEnabled: raw.applicationDeadlineEnabled,
     applicationDeadline: raw.applicationDeadline,
     tickets: raw.tickets.map((ticket) => ({

@@ -1,8 +1,15 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { CheckResult, EventInfo, RulesConfig, TicketInfo, TicketRule } from "./types.js";
-import { formatHourMinute } from "./utils/date.js";
-import { extractDeadlineTimeFromNotice, isApplicationDeadlineWithinEventRange, isDeadlineFiveMinutesBeforeStart, parseApplicationDeadlineDate } from "./utils/date.js";
+import {
+  extractDeadlineTimeFromNotice,
+  extractReceptionStartTimeFromBody,
+  extractReceptionStartTimeFromNotice,
+  formatHourMinute,
+  isApplicationDeadlineWithinEventRange,
+  isDeadlineFiveMinutesBeforeStart,
+  parseApplicationDeadlineDate
+} from "./utils/date.js";
 import { normalizeCommonText, normalizeNoticeText, normalizeTicketText } from "./utils/normalize.js";
 import { classifyTicketRulesByInfo, containsAllTags, sameTagSet, validateTicketNameBookTitle, validateTicketNameMemberLabel } from "./utils/ticket.js";
 import { normalizeOnlineUrl, safeFileName } from "./utils/url.js";
@@ -194,6 +201,7 @@ function validateOnlineFields(event: EventInfo, errors: string[], ticketIndexes:
   const noticeCheckableTickets = checkableTickets;
   const onlineTickets = checkableTickets.filter((ticket) => ticket.onlineEnabled === true);
   const urls = onlineTickets.map((ticket) => normalizeOnlineUrl(ticket.onlineUrl)).filter(Boolean);
+  const bodyReceptionStart = extractReceptionStartTimeFromBody(event.bodyText ?? "");
 
   for (const ticket of onlineTickets) {
     if (!normalizeOnlineUrl(ticket.onlineUrl)) {
@@ -212,6 +220,14 @@ function validateOnlineFields(event: EventInfo, errors: string[], ticketIndexes:
       errors.push(`主催者からのお知らせがチケット間で一致していません。異なるチケット: ${ticketPosition(ticket, ticketIndexes)}「${ticket.name}」`);
     } else {
       errors.push("主催者からのお知らせがチケット間で一致していません");
+    }
+  }
+
+  if (bodyReceptionStart) {
+    const representativeNotice = noticeCheckableTickets.find((ticket) => (ticket.organizerNotice ?? "").trim().length > 0)?.organizerNotice ?? "";
+    const noticeReceptionStart = extractReceptionStartTimeFromNotice(representativeNotice, event.startAt);
+    if (noticeReceptionStart !== bodyReceptionStart) {
+      errors.push(`主催者からのお知らせの受付開始時刻がページ本文と一致していません。期待: ${bodyReceptionStart} / 実際: ${noticeReceptionStart ?? "見つかりません"}`);
     }
   }
 

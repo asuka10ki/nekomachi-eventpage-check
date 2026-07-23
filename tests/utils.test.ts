@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { classifyEventByName } from "../src/utils/classify.js";
-import { extractDeadlineTimeFromNotice, isApplicationDeadlineWithinEventRange, isDeadlineFiveMinutesBeforeStart } from "../src/utils/date.js";
+import {
+  extractDeadlineTimeFromNotice,
+  extractReceptionStartTimeFromBody,
+  extractReceptionStartTimeFromNotice,
+  isApplicationDeadlineWithinEventRange,
+  isDeadlineFiveMinutesBeforeStart
+} from "../src/utils/date.js";
 import { normalizePriceText, normalizeTicketText, normalizeVisibilityTags } from "../src/utils/normalize.js";
 import { normalizeOnlineUrl } from "../src/utils/url.js";
 import { classifyTicketRulesByInfo, extractBookTitle, validateTicketNameBookTitle, validateTicketNameMemberLabel } from "../src/utils/ticket.js";
@@ -108,6 +114,15 @@ describe("deadline", () => {
     expect(isApplicationDeadlineWithinEventRange(startAt, "申込締切：7/22 12:00")).toBe(true);
     expect(isApplicationDeadlineWithinEventRange(startAt, "申込締切：2026/07/18 23:59")).toBe(false);
     expect(isApplicationDeadlineWithinEventRange(startAt, "申込締切：2026/07/23 00:00")).toBe(false);
+  });
+
+  it("extracts reception start time from body and organizer notice", () => {
+    const startAt = new Date(2026, 6, 22, 20, 30);
+    expect(extractReceptionStartTimeFromBody("■タイムテーブル 20:00 受付開始 20:30 読書会開始")).toBe("20:00");
+    expect(extractReceptionStartTimeFromBody("■タイムテーブル 受付開始 20:00 読書会開始 20:30")).toBe("20:00");
+    expect(extractReceptionStartTimeFromNotice("読書会スタート30分前から受付をオープンしております。20:25までに受付を済ませてください。", startAt)).toBe("20:00");
+    expect(extractReceptionStartTimeFromNotice("20時から受付を開始します。20:25までに受付を済ませてください。", startAt)).toBe("20:00");
+    expect(extractReceptionStartTimeFromNotice("受付開始：20時です。20:25までに受付を済ませてください。", startAt)).toBe("20:00");
   });
 });
 
@@ -266,6 +281,53 @@ describe("event checks", () => {
 
     expect(errors.some((error) => error.includes("オンライン参加URLが空"))).toBe(true);
     expect(errors).toContain("オフライン読書会には「懇親会まで参加」チケットが必要です");
+  });
+
+  it("accepts organizer notice reception start time matching the page body", () => {
+    const notice = "読書会スタート30分前から受付をオープンしております。可能な限り20:25までに受付を済ませてください。";
+    const event: EventInfo = {
+      name: "全6回オンライン読書会",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 22, 20, 30),
+      endAt: null,
+      venue: null,
+      bodyText: "■タイムテーブル 20:00 受付開始 20:30 読書会開始",
+      tickets: [
+        { name: "全6回 オンライン会員", price: 5000, visibility: null, visibilityTags: ["オン"], onlineEnabled: true, onlineUrl: "https://zoom.example.com/a", organizerNotice: notice },
+        { name: "全6回 地域会員", price: 5000, visibility: null, visibilityTags: ["オフ"], onlineEnabled: true, onlineUrl: "https://zoom.example.com/a", organizerNotice: notice },
+        { name: "全6回 ハイブリッド会員", price: 5000, visibility: null, visibilityTags: ["ハイ"], onlineEnabled: true, onlineUrl: "https://zoom.example.com/a", organizerNotice: notice },
+        { name: "全6回 非会員", price: 5000, visibility: null, visibilityTags: ["外"], onlineEnabled: true, onlineUrl: "https://zoom.example.com/a", organizerNotice: notice }
+      ]
+    };
+
+    const errors = checkEventInfo(event, rulesConfig).errors;
+
+    expect(errors.some((error) => error.includes("受付開始時刻がページ本文と一致していません"))).toBe(false);
+  });
+
+  it("rejects organizer notice reception start time different from the page body", () => {
+    const notice = "19:45から受付を開始します。可能な限り20:25までに受付を済ませてください。";
+    const event: EventInfo = {
+      name: "全6回オンライン読書会",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 22, 20, 30),
+      endAt: null,
+      venue: null,
+      bodyText: "■タイムテーブル 20:00 受付開始 20:30 読書会開始",
+      tickets: [
+        { name: "全6回 オンライン会員", price: 5000, visibility: null, visibilityTags: ["オン"], onlineEnabled: true, onlineUrl: "https://zoom.example.com/a", organizerNotice: notice },
+        { name: "全6回 地域会員", price: 5000, visibility: null, visibilityTags: ["オフ"], onlineEnabled: true, onlineUrl: "https://zoom.example.com/a", organizerNotice: notice },
+        { name: "全6回 ハイブリッド会員", price: 5000, visibility: null, visibilityTags: ["ハイ"], onlineEnabled: true, onlineUrl: "https://zoom.example.com/a", organizerNotice: notice },
+        { name: "全6回 非会員", price: 5000, visibility: null, visibilityTags: ["外"], onlineEnabled: true, onlineUrl: "https://zoom.example.com/a", organizerNotice: notice }
+      ]
+    };
+
+    const errors = checkEventInfo(event, rulesConfig).errors;
+
+    expect(errors).toContain("主催者からのお知らせの受付開始時刻がページ本文と一致していません。期待: 20:00 / 実際: 19:45");
+    expect(errors.filter((error) => error.includes("受付開始時刻がページ本文と一致していません"))).toHaveLength(1);
   });
 
   it("rejects duplicate offline participation types for the same member plan", () => {
