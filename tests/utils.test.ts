@@ -11,8 +11,16 @@ import { normalizePriceText, normalizeTicketText, normalizeVisibilityTags } from
 import { normalizeOnlineUrl } from "../src/utils/url.js";
 import { classifyTicketRulesByInfo, extractBookTitle, validateTicketNameBookTitle, validateTicketNameMemberLabel } from "../src/utils/ticket.js";
 import { checkEventInfo } from "../src/checker.js";
-import { buildSlackMessages } from "../src/slack.js";
+import { buildFatalErrorMessage, buildSlackMessages, isRetryableSlackFailure } from "../src/slack.js";
 import { sortResultsByStartAtDesc } from "../src/utils/sort.js";
+import {
+  assertAdminEventDetailPageState,
+  assertAdminEventListPageState,
+  assertAdminSessionIsValid,
+  assertCollectedEventsExist,
+  assertSuccessfulHttpResponse
+} from "../src/osiro.js";
+import { assertEventCountHasNotDroppedUnexpectedly } from "../src/check-state.js";
 import type { CheckResult, EventInfo, RulesConfig, TicketInfo, TicketRule } from "../src/types.js";
 
 describe("event classification", () => {
@@ -21,8 +29,59 @@ describe("event classification", () => {
     expect(classifyEventByName("〖予告〗『存在と時間』読書会")).toBe("skip");
     expect(classifyEventByName("U35で読む 村田沙耶香『コンビニ人間』｜U35 BOOK CLUB 東京開催")).toBe("offline");
     expect(classifyEventByName("【福岡 第一回】ゲストと読む『存在と時間』")).toBe("offline");
+    expect(classifyEventByName("【愛知】『存在と時間』読書会")).toBe("offline");
+    expect(classifyEventByName("文学フリマ大阪")).toBe("offline");
+    expect(classifyEventByName("猫町.で、旅をしよう。スケザネさんと空海を歩く、高松2泊3日")).toBe("offline");
     expect(classifyEventByName("事務局決済")).toBe("skip");
     expect(classifyEventByName("『存在と時間』読書会")).toBe("online");
+  });
+});
+
+describe("admin session", () => {
+  it("rejects a redirect to the login page", () => {
+    expect(() => assertAdminSessionIsValid("https://nekomachi-club.com/login")).toThrow(
+      "OSIROのログイン状態が期限切れです。npm run auth を実行してログイン状態を更新してください。"
+    );
+  });
+
+  it("accepts an authenticated admin event list URL", () => {
+    expect(() => assertAdminSessionIsValid("https://nekomachi-club.com/admin/events?state=yet_end")).not.toThrow();
+  });
+
+  it("rejects an event list page without the admin event index", () => {
+    expect(() => assertAdminEventListPageState("https://nekomachi-club.com/admin/events?state=yet_end", false)).toThrow(
+      "OSIROのイベント一覧画面を確認できませんでした。画面構造またはアクセス権限を確認してください。"
+    );
+  });
+
+  it("rejects an empty collected event list", () => {
+    expect(() => assertCollectedEventsExist([])).toThrow(
+      "OSIROの募集中イベントを1件も取得できませんでした。一覧画面の読み込みまたは画面構造を確認してください。"
+    );
+  });
+
+  it("rejects an event detail page without title or ticket fields", () => {
+    expect(() => assertAdminEventDetailPageState("https://nekomachi-club.com/admin_events/abc/edit", true, 0)).toThrow(
+      "OSIROのイベント詳細画面からタイトルまたはチケット欄を取得できませんでした。"
+    );
+  });
+
+  it("rejects an unsuccessful or missing HTTP response", () => {
+    expect(() => assertSuccessfulHttpResponse("https://nekomachi-club.com/admin/events", 500, false)).toThrow(
+      "OSIROへのアクセスに失敗しました。HTTPステータス: 500"
+    );
+    expect(() => assertSuccessfulHttpResponse("https://nekomachi-club.com/admin/events", null, false)).toThrow(
+      "OSIROへのアクセスに失敗しました。HTTPステータス: 取得不能"
+    );
+  });
+});
+
+describe("collection health", () => {
+  it("rejects an event count below half of the previous successful run", () => {
+    expect(() => assertEventCountHasNotDroppedUnexpectedly(36, 17)).toThrow(
+      "OSIROのイベント取得件数が前回から急減しました。前回: 36件 / 今回: 17件"
+    );
+    expect(() => assertEventCountHasNotDroppedUnexpectedly(36, 18)).not.toThrow();
   });
 });
 
@@ -149,6 +208,52 @@ describe("slack output", () => {
 
     expect(messages.join("\n")).toContain("イベント名: テストイベント（開催日時: 2026-07-01 20:30）");
   });
+
+  it("builds a Slack notification when the check terminates unexpectedly", () => {
+    const message = buildFatalErrorMessage(
+      new Error("OSIROのログイン状態が期限切れです"),
+      new Date("2026-07-30T00:45:00+09:00")
+    );
+
+    expect(message).toContain("🚨 猫町イベントチェック実行失敗");
+    expect(message).toContain("チェック処理が途中で終了しました。");
+    expect(message).toContain("エラー: OSIROのログイン状態が期限切れです");
+    expect(message).toContain("実行日時: 2026-07-30 00:45");
+  });
+
+  it("does not report all OK when an event is unknown", () => {
+    const messages = buildSlackMessages({
+      targetLabel: "テスト",
+      checkedCount: 1,
+      skippedCount: 0,
+      okCount: 0,
+      ngCount: 0,
+      unknownCount: 1,
+      executedAt: new Date("2026-07-30T00:45:00+09:00"),
+      results: [
+        {
+          eventName: "取得失敗イベント",
+          kind: "online",
+          detailUrl: "https://example.com",
+          startAt: null,
+          ok: false,
+          status: "unknown",
+          errors: ["詳細取得失敗"]
+        }
+      ]
+    });
+
+    expect(messages.join("\n")).toContain("UNKNOWN: 1件");
+    expect(messages.join("\n")).toContain("【UNKNOWN 1】");
+    expect(messages.join("\n")).not.toContain("結果: すべてOK");
+  });
+
+  it("retries temporary Slack failures but not permanent configuration errors", () => {
+    expect(isRetryableSlackFailure(429, "ratelimited")).toBe(true);
+    expect(isRetryableSlackFailure(503, "service_unavailable")).toBe(true);
+    expect(isRetryableSlackFailure(200, "internal_error")).toBe(true);
+    expect(isRetryableSlackFailure(200, "invalid_auth")).toBe(false);
+  });
 });
 
 describe("result sorting", () => {
@@ -185,7 +290,7 @@ describe("event checks", () => {
     }
   };
 
-  it("accepts a single free ticket without regular online ticket requirements", () => {
+  it("requires a single free online event to have an online-enabled ticket", () => {
     const event: EventInfo = {
       name: "無料イベント",
       kind: "online",
@@ -198,7 +303,24 @@ describe("event checks", () => {
       ]
     };
 
-    expect(checkEventInfo(event, rulesConfig).ok).toBe(true);
+    expect(checkEventInfo(event, rulesConfig).errors).toContain("オンライン対象イベントですが、「オンライン開催する」がONのチケットがありません");
+  });
+
+  it("rejects an online event when none of its regular tickets are online-enabled", () => {
+    const event: EventInfo = {
+      name: "オンライン読書会",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 6, 31, 20, 0),
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "オンライン会員 今月1回目", price: 0, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "非会員", price: 1100, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    expect(checkEventInfo(event, rulesConfig).errors).toContain("オンライン対象イベントですが、「オンライン開催する」がONのチケットがありません");
   });
 
   it("does not require a single applied-person ticket to be free", () => {
@@ -328,6 +450,64 @@ describe("event checks", () => {
 
     expect(errors).toContain("主催者からのお知らせの受付開始時刻がページ本文と一致していません。期待: 20:00 / 実際: 19:45");
     expect(errors.filter((error) => error.includes("受付開始時刻がページ本文と一致していません"))).toHaveLength(1);
+  });
+
+  it("accepts the required recurrence wording in the body fee section", () => {
+    const event: EventInfo = {
+      name: "無料イベント",
+      kind: "offline",
+      detailUrl: "https://example.com",
+      startAt: null,
+      endAt: null,
+      venue: null,
+      bodyText: "■参加費 今月1回目 500円 今月2回目以降 1,000円",
+      tickets: [
+        { name: "無料チケット", price: 0, visibility: null, visibilityTags: [], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    const errors = checkEventInfo(event, rulesConfig).errors;
+
+    expect(errors.some((error) => error.includes("ページ本文の参加費"))).toBe(false);
+  });
+
+  it("rejects bare recurrence wording in the body fee section", () => {
+    const event: EventInfo = {
+      name: "無料イベント",
+      kind: "offline",
+      detailUrl: "https://example.com",
+      startAt: null,
+      endAt: null,
+      venue: null,
+      bodyText: "■参加費 1回目 500円 2回目以降 1,000円",
+      tickets: [
+        { name: "無料チケット", price: 0, visibility: null, visibilityTags: [], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    const errors = checkEventInfo(event, rulesConfig).errors;
+
+    expect(errors).toContain("ページ本文の参加費の1回目表記を「今月1回目」にしてください");
+    expect(errors).toContain("ページ本文の参加費の2回目以降表記を「今月2回目以降」にしてください");
+  });
+
+  it("skips body fee recurrence checks when first and second wording is absent", () => {
+    const event: EventInfo = {
+      name: "無料イベント",
+      kind: "offline",
+      detailUrl: "https://example.com",
+      startAt: null,
+      endAt: null,
+      venue: null,
+      bodyText: "■参加費 会員 500円 非会員 1,000円",
+      tickets: [
+        { name: "無料チケット", price: 0, visibility: null, visibilityTags: [], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    const errors = checkEventInfo(event, rulesConfig).errors;
+
+    expect(errors.some((error) => error.includes("ページ本文の参加費"))).toBe(false);
   });
 
   it("rejects duplicate offline participation types for the same member plan", () => {
@@ -602,10 +782,10 @@ describe("event checks", () => {
       endAt: null,
       venue: null,
       tickets: [
-        { name: "全6回 オンライン会員・ハイブリッド会員", price: 5000, visibility: null, visibilityTags: ["オン", "ハイ"], onlineEnabled: false, onlineUrl: null, organizerNotice: notice },
-        { name: "全6回 地域会員", price: 5000, visibility: null, visibilityTags: ["オフ"], onlineEnabled: false, onlineUrl: null, organizerNotice: notice },
-        { name: "全6回 非会員", price: 5000, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: notice },
-        { name: "🔰初参加 全6回 非会員", price: 5000, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: notice }
+        { name: "全6回 オンライン会員・ハイブリッド会員", price: 5000, visibility: null, visibilityTags: ["オン", "ハイ"], onlineEnabled: true, onlineUrl: "https://zoom.example.com/a", organizerNotice: notice },
+        { name: "全6回 地域会員", price: 5000, visibility: null, visibilityTags: ["オフ"], onlineEnabled: true, onlineUrl: "https://zoom.example.com/a", organizerNotice: notice },
+        { name: "全6回 非会員", price: 5000, visibility: null, visibilityTags: ["外"], onlineEnabled: true, onlineUrl: "https://zoom.example.com/a", organizerNotice: notice },
+        { name: "🔰初参加 全6回 非会員", price: 5000, visibility: null, visibilityTags: ["外"], onlineEnabled: true, onlineUrl: "https://zoom.example.com/a", organizerNotice: notice }
       ]
     };
 
@@ -767,6 +947,24 @@ describe("event checks", () => {
     };
 
     expect(checkEventInfo(event, rulesConfig).ok).toBe(true);
+  });
+
+  it("accepts multiple same-price fixed-fee tickets plus a plan-change ticket", () => {
+    const event: EventInfo = {
+      name: "【愛知】美術館鑑賞会",
+      kind: "offline",
+      detailUrl: "https://example.com",
+      startAt: null,
+      endAt: null,
+      venue: "美術館",
+      tickets: [
+        { name: "懇親感想会まで参加", price: 0, visibility: "全員", visibilityTags: ["オン", "オフ", "ハイ", "外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "美術館鑑賞会のみ参加", price: 0, visibility: "全員", visibilityTags: ["オン", "オフ", "ハイ", "外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    expect(checkEventInfo(event, rulesConfig).errors).toEqual([]);
   });
 
   it("requires fixed-fee ticket to cover every member plan", () => {

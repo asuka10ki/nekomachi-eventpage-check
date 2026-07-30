@@ -53,6 +53,7 @@ export type CheckResult = {
   detailUrl: string;
   startAt: Date | null;
   ok: boolean;
+  status?: "unknown";
   errors: string[];
 };
 
@@ -62,6 +63,7 @@ export type CheckSummary = {
   skippedCount: number;
   okCount: number;
   ngCount: number;
+  unknownCount?: number;
   results: CheckResult[];
   executedAt: Date;
 };

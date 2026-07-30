@@ -6,8 +6,8 @@ export function normalizeEventNameForClassification(eventName: string): string {
 
 export function normalizeTitleText(text: string): string {
   return normalizeCommonText(text)
-    .replace(/[【〖](オンライン|東京|大阪|京都|福岡|名古屋|予告|一覧)[】〗]/g, "")
-    .replace(/\b(オンライン|東京|大阪|京都|福岡|名古屋|予告|一覧)\b/g, "")
+    .replace(/[【〖](オンライン|東京|大阪|京都|福岡|名古屋|愛知|予告|一覧)[】〗]/g, "")
+    .replace(/\b(オンライン|東京|大阪|京都|福岡|名古屋|愛知|予告|一覧)\b/g, "")
     .replace(/(オンライン会員|地域会員|ハイブリッド会員|非会員)/g, "")
     .replace(/(2回目以降|二回目以降|1回目|一回目|初回)/g, "")
     .replace(/[（(]?(税込)?[￥¥]?\s*[\d,]+\s*円?[）)]?/g, "")

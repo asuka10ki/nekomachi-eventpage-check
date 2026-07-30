@@ -27,6 +27,8 @@ export function checkEventInfo(event: EventInfo, rulesConfig: RulesConfig): Chec
   validateOperationMemberTicket(event, errors, ticketIndexes);
   validateAppliedPersonTicketNames(event.tickets, errors, ticketIndexes);
   validateApplicationDeadline(event, errors);
+  validateBodyFeeRecurrence(event, errors);
+  validateOnlineTicketPresence(event, errors);
 
   if (areAllAppliedPersonTickets(event.tickets)) {
     return {
@@ -85,7 +87,7 @@ export function checkEventInfo(event: EventInfo, rulesConfig: RulesConfig): Chec
   if (isFixedFeeWithPlanChangeEvent(event.tickets)) {
     validateLegacyMemberDuplicates(event, errors, ticketIndexes);
     validatePlanChangeTicket(event.tickets.filter((ticket) => isPlanChangeTicket(ticket)), errors, ticketIndexes);
-    validateFixedFeeTicket(event.tickets.filter((ticket) => !isPlanChangeTicket(ticket)), errors, ticketIndexes);
+    validateFixedFeeTickets(event.tickets.filter((ticket) => !isPlanChangeTicket(ticket)), errors, ticketIndexes);
     return {
       eventName: event.name,
       kind: event.kind,
@@ -259,6 +261,30 @@ function validateApplicationDeadline(event: EventInfo, errors: string[]): void {
     const earliest = new Date(eventDate);
     earliest.setDate(earliest.getDate() - 3);
     errors.push(`申込締切日は開催日の3日前から開催日までにしてください。期待: ${formatDate(earliest)}〜${formatDate(eventDate)} / 実際: ${deadline || "取得できません"}`);
+  }
+}
+
+function validateBodyFeeRecurrence(event: EventInfo, errors: string[]): void {
+  const bodyText = normalizeCommonText(event.bodyText ?? "");
+  if (!bodyText.includes("参加費")) return;
+
+  const hasFirstRecurrence = bodyText.includes("1回目");
+  const hasSecondRecurrence = bodyText.includes("2回目");
+
+  if (hasFirstRecurrence && !bodyText.includes("今月1回目")) {
+    errors.push("ページ本文の参加費の1回目表記を「今月1回目」にしてください");
+  }
+  if (hasSecondRecurrence && !bodyText.includes("今月2回目以降")) {
+    errors.push("ページ本文の参加費の2回目以降表記を「今月2回目以降」にしてください");
+  }
+}
+
+function validateOnlineTicketPresence(event: EventInfo, errors: string[]): void {
+  if (!runsOnlineChecks(event)) return;
+
+  const checkableTickets = event.tickets.filter((ticket) => !isPlanChangeTicket(ticket));
+  if (!checkableTickets.some((ticket) => ticket.onlineEnabled === true)) {
+    errors.push("オンライン対象イベントですが、「オンライン開催する」がONのチケットがありません");
   }
 }
 
@@ -440,19 +466,24 @@ function areAllAppliedPersonTickets(tickets: TicketInfo[]): boolean {
 }
 
 function isFixedFeeWithPlanChangeEvent(tickets: TicketInfo[]): boolean {
-  return tickets.length === 2 && tickets.some((ticket) => isPlanChangeTicket(ticket));
+  const planChangeTickets = tickets.filter((ticket) => isPlanChangeTicket(ticket));
+  const fixedFeeTickets = tickets.filter((ticket) => !isPlanChangeTicket(ticket));
+  if (planChangeTickets.length !== 1 || fixedFeeTickets.length === 0) return false;
+  if (fixedFeeTickets.length === 1) return true;
+
+  const expectedPrice = fixedFeeTickets[0].price;
+  const expectedTags = ["オン", "オフ", "ハイ", "外"];
+  return expectedPrice !== null
+    && fixedFeeTickets.every((ticket) => ticket.price === expectedPrice)
+    && fixedFeeTickets.every((ticket) => containsAllTags(ticket.visibilityTags, expectedTags));
 }
 
-function validateFixedFeeTicket(tickets: TicketInfo[], errors: string[], ticketIndexes: Map<TicketInfo, number>): void {
-  if (tickets.length !== 1) {
-    errors.push("固定費イベントでは、プラン変更チケット以外のチケットが1つだけである必要があります");
-    return;
-  }
-
-  const ticket = tickets[0];
+function validateFixedFeeTickets(tickets: TicketInfo[], errors: string[], ticketIndexes: Map<TicketInfo, number>): void {
   const expectedTags = ["オン", "オフ", "ハイ", "外"];
-  if (!containsAllTags(ticket.visibilityTags, expectedTags)) {
-    errors.push(`${ticketPosition(ticket, ticketIndexes)}固定費チケットの閲覧権限が不足しています。期待: ${expectedTags.join(",")} / 実際: ${ticket.visibilityTags.join(",") || "取得できません"}`);
+  for (const ticket of tickets) {
+    if (!containsAllTags(ticket.visibilityTags, expectedTags)) {
+      errors.push(`${ticketPosition(ticket, ticketIndexes)}固定費チケットの閲覧権限が不足しています。期待: ${expectedTags.join(",")} / 実際: ${ticket.visibilityTags.join(",") || "取得できません"}`);
+    }
   }
 }
 

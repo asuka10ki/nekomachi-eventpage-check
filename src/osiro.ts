@@ -23,21 +23,47 @@ type RawAdminEventFormData = {
 };
 
 export async function collectEventList(page: Page, listUrl: string): Promise<EventListItem[]> {
-  await page.goto(listUrl, { waitUntil: "domcontentloaded" });
+  const response = await page.goto(listUrl, { waitUntil: "domcontentloaded" });
+  assertSuccessfulHttpResponse(page.url(), response?.status() ?? null, response?.ok() ?? false);
+  assertAdminSessionIsValid(page.url());
+  await assertAdminEventListPage(page);
   const items = await collectCurrentPageEvents(page);
   return dedupeByUrl(items);
 }
 
 export async function collectEventListWithPagination(page: Page, listUrl: string): Promise<EventListItem[]> {
-  await page.goto(listUrl, { waitUntil: "domcontentloaded" });
+  const response = await page.goto(listUrl, { waitUntil: "domcontentloaded" });
+  assertSuccessfulHttpResponse(page.url(), response?.status() ?? null, response?.ok() ?? false);
+  assertAdminSessionIsValid(page.url());
   const all: EventListItem[] = [];
   for (let i = 0; i < 20; i += 1) {
+    await assertAdminEventListPage(page);
     all.push(...(await collectCurrentPageEvents(page)));
     const next = page.getByRole("link", { name: /次へ|Next/i }).or(page.getByRole("button", { name: /次へ|Next/i }));
-    if ((await next.count()) === 0 || !(await next.first().isEnabled().catch(() => false))) break;
-    await Promise.all([page.waitForLoadState("domcontentloaded"), next.first().click()]);
+    if ((await next.count()) === 0 || !(await next.first().isEnabled())) break;
+    if (i === 19) {
+      throw new Error("OSIROのイベント一覧が20ページを超えたため、全ページを取得できませんでした。");
+    }
+
+    const previousUrl = page.url();
+    const [navigationResponse] = await Promise.all([
+      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30000 }),
+      next.first().click()
+    ]);
+    assertSuccessfulHttpResponse(page.url(), navigationResponse?.status() ?? null, navigationResponse?.ok() ?? false);
+    assertAdminSessionIsValid(page.url());
+    if (page.url() === previousUrl) {
+      throw new Error("OSIROのイベント一覧で次ページへ移動できませんでした。");
+    }
   }
   return dedupeByUrl(all);
+}
+
+export function assertAdminSessionIsValid(currentUrl: string): void {
+  const pathname = new URL(currentUrl).pathname;
+  if (pathname === "/login" || pathname.startsWith("/login/")) {
+    throw new Error("OSIROのログイン状態が期限切れです。npm run auth を実行してログイン状態を更新してください。");
+  }
 }
 
 export async function collectEventListsWithPagination(page: Page, listUrls: string[]): Promise<EventListItem[]> {
@@ -45,14 +71,18 @@ export async function collectEventListsWithPagination(page: Page, listUrls: stri
   for (const listUrl of listUrls) {
     all.push(...(await collectEventListWithPagination(page, listUrl)));
   }
-  return dedupeByUrl(all);
+  const events = dedupeByUrl(all);
+  assertCollectedEventsExist(events);
+  return events;
 }
 
 export async function fetchEventInfo(context: BrowserContext, item: EventListItem): Promise<EventInfo> {
   const page = await context.newPage();
   try {
-    await page.goto(item.detailUrl, { waitUntil: "networkidle", timeout: 60000 });
-    await page.locator("#title, [name='event_ticket_name']").first().waitFor({ state: "attached", timeout: 15000 }).catch(() => undefined);
+    const response = await page.goto(item.detailUrl, { waitUntil: "networkidle", timeout: 60000 });
+    assertSuccessfulHttpResponse(page.url(), response?.status() ?? null, response?.ok() ?? false);
+    assertAdminSessionIsValid(page.url());
+    await assertAdminEventDetailPage(page);
 
     const formData = await extractAdminEventFormData(page);
     const name = formData.name || (await getFieldText(page, ["イベント名", "タイトル"])) || item.name;
@@ -77,6 +107,48 @@ export async function fetchEventInfo(context: BrowserContext, item: EventListIte
   } finally {
     await page.close();
   }
+}
+
+export function assertCollectedEventsExist(events: EventListItem[]): void {
+  if (events.length === 0) {
+    throw new Error("OSIROの募集中イベントを1件も取得できませんでした。一覧画面の読み込みまたは画面構造を確認してください。");
+  }
+}
+
+export function assertSuccessfulHttpResponse(url: string, status: number | null, ok: boolean): void {
+  if (status === null || !ok) {
+    throw new Error(`OSIROへのアクセスに失敗しました。HTTPステータス: ${status ?? "取得不能"} / URL: ${url}`);
+  }
+}
+
+export function assertAdminEventListPageState(currentUrl: string, hasEventIndex: boolean): void {
+  assertAdminSessionIsValid(currentUrl);
+  const pathname = new URL(currentUrl).pathname;
+  if (pathname !== "/admin/events" || !hasEventIndex) {
+    throw new Error("OSIROのイベント一覧画面を確認できませんでした。画面構造またはアクセス権限を確認してください。");
+  }
+}
+
+export function assertAdminEventDetailPageState(currentUrl: string, hasTitle: boolean, ticketCount: number): void {
+  assertAdminSessionIsValid(currentUrl);
+  const pathname = new URL(currentUrl).pathname;
+  if (!/^\/admin_events\/[^/]+\/edit$/.test(pathname) || !hasTitle || ticketCount === 0) {
+    throw new Error("OSIROのイベント詳細画面からタイトルまたはチケット欄を取得できませんでした。");
+  }
+}
+
+async function assertAdminEventListPage(page: Page): Promise<void> {
+  const eventIndex = page.locator("#eventIndex");
+  await eventIndex.waitFor({ state: "attached", timeout: 15000 }).catch(() => undefined);
+  assertAdminEventListPageState(page.url(), (await eventIndex.count()) > 0);
+}
+
+async function assertAdminEventDetailPage(page: Page): Promise<void> {
+  const title = page.locator("#title");
+  const ticketNames = page.locator("[name='event_ticket_name']");
+  await title.waitFor({ state: "attached", timeout: 15000 }).catch(() => undefined);
+  await ticketNames.first().waitFor({ state: "attached", timeout: 15000 }).catch(() => undefined);
+  assertAdminEventDetailPageState(page.url(), (await title.count()) > 0, await ticketNames.count());
 }
 
 function classifyEventKind(eventName: string, venue: string | null): EventInfo["kind"] {
