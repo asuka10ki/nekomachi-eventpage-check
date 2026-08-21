@@ -103,7 +103,7 @@ export function checkEventInfo(event: EventInfo, rulesConfig: RulesConfig): Chec
   if (isFixedFeeWithPlanChangeEvent(event.tickets)) {
     validateLegacyMemberDuplicates(event, errors, ticketIndexes);
     validatePlanChangeTicket(event.tickets.filter((ticket) => isPlanChangeTicket(ticket)), errors, ticketIndexes);
-    validateFixedFeeTickets(event.tickets.filter((ticket) => !isPlanChangeTicket(ticket)), rules, errors, ticketIndexes);
+    validateFixedFeeTickets(event.tickets.filter((ticket) => !isPlanChangeTicket(ticket)), errors, ticketIndexes);
     return {
       eventName: event.name,
       kind: event.kind,
@@ -539,16 +539,11 @@ function isFixedFeeWithPlanChangeEvent(tickets: TicketInfo[]): boolean {
 
 function validateFixedFeeTickets(
   tickets: TicketInfo[],
-  rules: TicketRule[],
   errors: string[],
   ticketIndexes: Map<TicketInfo, number>
 ): void {
   const expectedTags = ["オン", "オフ", "ハイ", "外"];
-  const expectedPrices = [...new Set(rules.flatMap((rule) => [rule.price, ...(rule.priceAlternatives ?? [])]))].sort((a, b) => a - b);
   for (const ticket of tickets) {
-    if (!expectedPrices.includes(ticket.price ?? Number.NaN)) {
-      errors.push(`${ticketPosition(ticket, ticketIndexes)}固定費チケットの金額が期待値と異なります。期待: ${expectedPrices.join("円、")}円 / 実際: ${ticket.price ?? "取得できません"}`);
-    }
     if (!containsAllTags(ticket.visibilityTags, expectedTags)) {
       errors.push(`${ticketPosition(ticket, ticketIndexes)}固定費チケットの閲覧権限が不足しています。期待: ${expectedTags.join(",")} / 実際: ${ticket.visibilityTags.join(",") || "取得できません"}`);
     }

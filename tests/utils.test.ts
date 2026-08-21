@@ -289,17 +289,6 @@ describe("event checks", () => {
       ]
     }
   };
-  const fixedFeeRulesConfig: RulesConfig = {
-    ...rulesConfig,
-    offline: {
-      matchMode: "contains",
-      tickets: [
-        { id: "member_first", name: "会員", note: "1回目", price: 0, visibilityTags: ["オン"] },
-        { id: "member_second", name: "会員", note: "2回目以降", price: 1800, visibilityTags: ["オフ"] },
-        { id: "non_member", name: "非会員", price: 2300, visibilityTags: ["外"] }
-      ]
-    }
-  };
 
   it("requires a single free online event to have an online-enabled ticket", () => {
     const event: EventInfo = {
@@ -943,7 +932,7 @@ describe("event checks", () => {
     expect(checkEventInfo(event, rulesConfig).errors).toContain("固定費イベントでは、片方がプラン変更チケットである必要があります");
   });
 
-  it("accepts a fixed-fee ticket plus plan-change ticket with an allowed regular price", () => {
+  it("accepts a fixed-fee ticket plus plan-change ticket without normal plan price rules", () => {
     const event: EventInfo = {
       name: "【名古屋】講座",
       kind: "offline",
@@ -952,12 +941,12 @@ describe("event checks", () => {
       endAt: null,
       venue: null,
       tickets: [
-        { name: "固定費チケット", price: 1800, visibility: "全員", visibilityTags: ["オン", "オフ", "ハイ", "外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "固定費チケット", price: 1500, visibility: "全員", visibilityTags: ["オン", "オフ", "ハイ", "外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
         { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "(1)【5月まで】ラウンジ会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
-    expect(checkEventInfo(event, fixedFeeRulesConfig).ok).toBe(true);
+    expect(checkEventInfo(event, rulesConfig).ok).toBe(true);
   });
 
   it("accepts multiple differently priced fixed-fee tickets plus a plan-change ticket", () => {
@@ -975,7 +964,7 @@ describe("event checks", () => {
       ]
     };
 
-    expect(checkEventInfo(event, fixedFeeRulesConfig).errors).toEqual([]);
+    expect(checkEventInfo(event, rulesConfig).errors).toEqual([]);
   });
 
   it("requires fixed-fee ticket to cover every member plan", () => {
@@ -995,7 +984,7 @@ describe("event checks", () => {
     expect(checkEventInfo(event, rulesConfig).errors).toContain("[1番目] 固定費チケットの閲覧権限が不足しています。期待: オン,オフ,ハイ,外 / 実際: オン,オフ");
   });
 
-  it("rejects a fixed-fee ticket whose price is outside the regular price set", () => {
+  it("does not compare a fixed-fee ticket price with the regular price set", () => {
     const event: EventInfo = {
       name: "【名古屋】講座",
       kind: "offline",
@@ -1009,7 +998,7 @@ describe("event checks", () => {
       ]
     };
 
-    expect(checkEventInfo(event, fixedFeeRulesConfig).errors).toContain("[1番目] 固定費チケットの金額が期待値と異なります。期待: 0円、1800円、2300円 / 実際: 1500");
+    expect(checkEventInfo(event, rulesConfig).errors.some((error) => error.includes("固定費チケットの金額"))).toBe(false);
   });
 
   it("treats partial-series events as price-exempt but requires a plan-change ticket", () => {
