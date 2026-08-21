@@ -289,6 +289,17 @@ describe("event checks", () => {
       ]
     }
   };
+  const fixedFeeRulesConfig: RulesConfig = {
+    ...rulesConfig,
+    offline: {
+      matchMode: "contains",
+      tickets: [
+        { id: "member_first", name: "会員", note: "1回目", price: 0, visibilityTags: ["オン"] },
+        { id: "member_second", name: "会員", note: "2回目以降", price: 1800, visibilityTags: ["オフ"] },
+        { id: "non_member", name: "非会員", price: 2300, visibilityTags: ["外"] }
+      ]
+    }
+  };
 
   it("requires a single free online event to have an online-enabled ticket", () => {
     const event: EventInfo = {
@@ -790,7 +801,7 @@ describe("event checks", () => {
     };
 
     const errors = checkEventInfo(event, rulesConfig).errors;
-    expect(errors).toEqual([]);
+    expect(errors).toContain("期待されるチケット「プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。」が見つかりません");
   });
 
   it("treats online events as all-session events when only the plan-change ticket is not all-session", () => {
@@ -835,8 +846,8 @@ describe("event checks", () => {
     const errors = checkEventInfo(event, rulesConfig).errors;
     expect(errors).toContain("全N回チケットには「ハイブリッド会員」のチケットが1つ必要です");
     expect(errors.some((error) => error.includes("全N回チケット「地域会員」が複数存在します"))).toBe(true);
-    expect(errors.some((error) => error.includes("期待されるチケット"))).toBe(false);
-    expect(errors.some((error) => error.includes("プラン変更後にお申し込み下さい"))).toBe(false);
+    expect(errors.some((error) => error.includes("期待されるチケット"))).toBe(true);
+    expect(errors.some((error) => error.includes("プラン変更後にお申し込み下さい"))).toBe(true);
   });
 
   it("treats all-applied-person events like fixed-fee events without regular plan checks", () => {
@@ -924,7 +935,7 @@ describe("event checks", () => {
       endAt: null,
       venue: null,
       tickets: [
-        { name: "固定費チケット", price: 1500, visibility: "全員", visibilityTags: ["オン", "オフ", "ハイ", "外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "固定費チケット", price: 1800, visibility: "全員", visibilityTags: ["オン", "オフ", "ハイ", "外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
         { name: "追加チケット", price: 0, visibility: "全員", visibilityTags: ["オン", "オフ", "ハイ", "外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
@@ -932,7 +943,7 @@ describe("event checks", () => {
     expect(checkEventInfo(event, rulesConfig).errors).toContain("固定費イベントでは、片方がプラン変更チケットである必要があります");
   });
 
-  it("accepts a fixed-fee ticket plus plan-change ticket without normal plan rules", () => {
+  it("accepts a fixed-fee ticket plus plan-change ticket with an allowed regular price", () => {
     const event: EventInfo = {
       name: "【名古屋】講座",
       kind: "offline",
@@ -941,15 +952,15 @@ describe("event checks", () => {
       endAt: null,
       venue: null,
       tickets: [
-        { name: "固定費チケット", price: 1500, visibility: "全員", visibilityTags: ["オン", "オフ", "ハイ", "外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "固定費チケット", price: 1800, visibility: "全員", visibilityTags: ["オン", "オフ", "ハイ", "外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
         { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "(1)【5月まで】ラウンジ会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
-    expect(checkEventInfo(event, rulesConfig).ok).toBe(true);
+    expect(checkEventInfo(event, fixedFeeRulesConfig).ok).toBe(true);
   });
 
-  it("accepts multiple same-price fixed-fee tickets plus a plan-change ticket", () => {
+  it("accepts multiple differently priced fixed-fee tickets plus a plan-change ticket", () => {
     const event: EventInfo = {
       name: "【愛知】美術館鑑賞会",
       kind: "offline",
@@ -958,13 +969,13 @@ describe("event checks", () => {
       endAt: null,
       venue: "美術館",
       tickets: [
-        { name: "懇親感想会まで参加", price: 0, visibility: "全員", visibilityTags: ["オン", "オフ", "ハイ", "外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
-        { name: "美術館鑑賞会のみ参加", price: 0, visibility: "全員", visibilityTags: ["オン", "オフ", "ハイ", "外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "懇親感想会まで参加", price: 2800, visibility: "全員", visibilityTags: ["オン", "オフ", "ハイ", "外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "美術館鑑賞会のみ参加", price: 2300, visibility: "全員", visibilityTags: ["オン", "オフ", "ハイ", "外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
         { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
-    expect(checkEventInfo(event, rulesConfig).errors).toEqual([]);
+    expect(checkEventInfo(event, fixedFeeRulesConfig).errors).toEqual([]);
   });
 
   it("requires fixed-fee ticket to cover every member plan", () => {
@@ -976,12 +987,53 @@ describe("event checks", () => {
       endAt: null,
       venue: null,
       tickets: [
-        { name: "固定費チケット", price: 1500, visibility: "一部会員", visibilityTags: ["オン", "オフ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "固定費チケット", price: 1800, visibility: "一部会員", visibilityTags: ["オン", "オフ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
         { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "(1)【5月まで】ラウンジ会員", visibilityTags: ["(1)【5月まで】ラウンジ会員"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 
     expect(checkEventInfo(event, rulesConfig).errors).toContain("[1番目] 固定費チケットの閲覧権限が不足しています。期待: オン,オフ,ハイ,外 / 実際: オン,オフ");
+  });
+
+  it("rejects a fixed-fee ticket whose price is outside the regular price set", () => {
+    const event: EventInfo = {
+      name: "【名古屋】講座",
+      kind: "offline",
+      detailUrl: "https://example.com",
+      startAt: null,
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "固定費チケット", price: 1500, visibility: "全員", visibilityTags: ["オン", "オフ", "ハイ", "外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    expect(checkEventInfo(event, fixedFeeRulesConfig).errors).toContain("[1番目] 固定費チケットの金額が期待値と異なります。期待: 0円、1800円、2300円 / 実際: 1500");
+  });
+
+  it("treats partial-series events as price-exempt but requires a plan-change ticket", () => {
+    const notice = "19:55までに参加してください";
+    const event: EventInfo = {
+      name: "【全3回・著者レクチャー】オンライン講座 第二回",
+      kind: "online",
+      detailUrl: "https://example.com",
+      startAt: new Date(2026, 8, 16, 20, 0),
+      endAt: null,
+      venue: "Zoom",
+      tickets: [
+        { name: "全3回参加にお申し込み済の方", price: 0, visibility: null, visibilityTags: ["オン", "オフ", "ハイ", "外", "A", "U-22", "B"], onlineEnabled: true, onlineUrl: "https://previous.example.com", organizerNotice: "別のお知らせ" },
+        { name: "第2回から参加", price: 5000, visibility: null, visibilityTags: ["外"], onlineEnabled: true, onlineUrl: "https://zoom.example.com/a", organizerNotice: notice },
+        { name: "第2回から参加", price: 4000, visibility: null, visibilityTags: ["オフ"], onlineEnabled: true, onlineUrl: "https://zoom.example.com/a", organizerNotice: notice },
+        { name: "第2回から参加", price: 3000, visibility: null, visibilityTags: ["オン", "ハイ"], onlineEnabled: true, onlineUrl: "https://zoom.example.com/a", organizerNotice: notice }
+      ]
+    };
+
+    const errors = checkEventInfo(event, rulesConfig).errors;
+    expect(errors.some((error) => error.includes("金額が期待値と異なります"))).toBe(false);
+    expect(errors).toContain("期待されるチケット「プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。」が見つかりません");
+    expect(errors.some((error) => error.includes("オンライン参加URLがチケット間で一致していません"))).toBe(false);
+    expect(errors.some((error) => error.includes("主催者からのお知らせがチケット間で一致していません"))).toBe(false);
   });
 
   it("detects duplicate legacy member tickets", () => {
@@ -1059,6 +1111,26 @@ describe("event checks", () => {
         { name: "読書会のみ参加", price: 3000, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
         { name: "懇親会まで参加", price: 3000, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
         { name: "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。", price: 0, visibility: "旧会員", visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
+      ]
+    };
+
+    const errors = checkEventInfo(event, rulesConfig).errors;
+    expect(errors.filter((error) => error.includes("金額が期待値と異なります"))).toEqual([]);
+  });
+
+  it("uses regular offline prices for Komai-san events", () => {
+    const event: EventInfo = {
+      name: "【東京】駒井稔さんと読む、村上春樹最新長編『夏帆 The Tale of KAHO』",
+      kind: "offline",
+      detailUrl: "https://example.com",
+      startAt: null,
+      endAt: null,
+      venue: null,
+      tickets: [
+        { name: "地域会員・ハイブリッド会員（今月1回目）", price: 0, visibility: null, visibilityTags: ["オフ", "ハイ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "地域会員・ハイブリッド会員（今月2回目以降）", price: 1800, visibility: null, visibilityTags: ["オフ", "ハイ"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "オンライン会員", price: 1800, visibility: null, visibilityTags: ["オン"], onlineEnabled: false, onlineUrl: null, organizerNotice: null },
+        { name: "非会員", price: 2300, visibility: null, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }
       ]
     };
 

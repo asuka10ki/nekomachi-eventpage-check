@@ -29,6 +29,26 @@ export function checkEventInfo(event: EventInfo, rulesConfig: RulesConfig): Chec
   validateApplicationDeadline(event, errors);
   validateBodyFeeRecurrence(event, errors);
   validateOnlineTicketPresence(event, errors);
+  if (isAllSeriesEvent(event)) {
+    validatePlanChangeTicket(event.tickets.filter((ticket) => isPlanChangeTicket(ticket)), errors, ticketIndexes);
+  }
+
+  if (isPartialSeriesEvent(event)) {
+    const enrollmentTickets = event.tickets.filter((ticket) => !isPlanChangeTicket(ticket) && !isAppliedPersonTicket(ticket));
+    validatePartialSeriesTickets(enrollmentTickets, errors, ticketIndexes);
+    validateLegacyMemberDuplicates(event, errors, ticketIndexes);
+    if (runsOnlineChecks(event)) {
+      validateOnlineFields(event, errors, ticketIndexes, enrollmentTickets);
+    }
+    return {
+      eventName: event.name,
+      kind: event.kind,
+      detailUrl: event.detailUrl,
+      startAt: event.startAt,
+      ok: errors.length === 0,
+      errors
+    };
+  }
 
   if (areAllAppliedPersonTickets(event.tickets)) {
     return {
@@ -43,11 +63,7 @@ export function checkEventInfo(event: EventInfo, rulesConfig: RulesConfig): Chec
 
   if (runsOnlineChecks(event) && isAllSessionOnlineEvent(event.tickets)) {
     const allSessionTickets = event.tickets.filter((ticket) => !isPlanChangeTicket(ticket));
-    const planChangeTickets = event.tickets.filter((ticket) => isPlanChangeTicket(ticket));
     validateAllSessionOnlineTickets(allSessionTickets, errors, ticketIndexes);
-    if (planChangeTickets.length > 0) {
-      validatePlanChangeTicket(planChangeTickets, errors, ticketIndexes);
-    }
     validateLegacyMemberDuplicates(event, errors, ticketIndexes);
     validateOnlineFields(event, errors, ticketIndexes);
     return {
@@ -87,7 +103,7 @@ export function checkEventInfo(event: EventInfo, rulesConfig: RulesConfig): Chec
   if (isFixedFeeWithPlanChangeEvent(event.tickets)) {
     validateLegacyMemberDuplicates(event, errors, ticketIndexes);
     validatePlanChangeTicket(event.tickets.filter((ticket) => isPlanChangeTicket(ticket)), errors, ticketIndexes);
-    validateFixedFeeTickets(event.tickets.filter((ticket) => !isPlanChangeTicket(ticket)), errors, ticketIndexes);
+    validateFixedFeeTickets(event.tickets.filter((ticket) => !isPlanChangeTicket(ticket)), rules, errors, ticketIndexes);
     return {
       eventName: event.name,
       kind: event.kind,
@@ -198,8 +214,13 @@ function validateTicket(
   }
 }
 
-function validateOnlineFields(event: EventInfo, errors: string[], ticketIndexes: Map<TicketInfo, number>): void {
-  const checkableTickets = event.tickets.filter((ticket) => !isPlanChangeTicket(ticket));
+function validateOnlineFields(
+  event: EventInfo,
+  errors: string[],
+  ticketIndexes: Map<TicketInfo, number>,
+  targetTickets?: TicketInfo[]
+): void {
+  const checkableTickets = targetTickets ?? event.tickets.filter((ticket) => !isPlanChangeTicket(ticket));
   const noticeCheckableTickets = checkableTickets;
   const onlineTickets = checkableTickets.filter((ticket) => ticket.onlineEnabled === true);
   const urls = onlineTickets.map((ticket) => normalizeOnlineUrl(ticket.onlineUrl)).filter(Boolean);
@@ -353,6 +374,9 @@ function isGuestOnlineEvent(event: EventInfo): boolean {
 }
 
 function isGuestEventName(event: EventInfo): boolean {
+  if (!event.name.includes("ゲスト") && /駒井\s*(?:稔\s*)?さんと読む/.test(event.name)) {
+    return false;
+  }
   return /ゲスト|さんと読む/.test(event.name);
 }
 
@@ -404,7 +428,45 @@ function isExcludedFromPriceCheck(ticket: TicketInfo): boolean {
 }
 
 function isAppliedPersonTicket(ticket: TicketInfo): boolean {
-  return /お申し込み済みの方/.test(ticket.name);
+  return /お申し込み済み?の方/.test(ticket.name);
+}
+
+function isPartialSeriesEvent(event: EventInfo): boolean {
+  return isAllSeriesEvent(event)
+    && event.tickets.some((ticket) => /第\s*\d+\s*回から参加/.test(normalizeTicketText(ticket.name)));
+}
+
+function isAllSeriesEvent(event: EventInfo): boolean {
+  return /全\s*\d+\s*回/.test(normalizeTicketText(event.name));
+}
+
+function validatePartialSeriesTickets(
+  tickets: TicketInfo[],
+  errors: string[],
+  ticketIndexes: Map<TicketInfo, number>
+): void {
+  if (tickets.length === 0) {
+    errors.push("途中参加イベントの申込チケットが見つかりません");
+    return;
+  }
+
+  const expectedPlans = [
+    { tag: "オン", label: "オンライン会員" },
+    { tag: "オフ", label: "地域会員" },
+    { tag: "ハイ", label: "ハイブリッド会員" },
+    { tag: "外", label: "非会員" }
+  ];
+  for (const plan of expectedPlans) {
+    if (!tickets.some((ticket) => ticket.visibilityTags.includes(plan.tag))) {
+      errors.push(`途中参加イベントに「${plan.label}」向けチケットがありません`);
+    }
+  }
+
+  for (const ticket of tickets) {
+    if (ticket.onlineEnabled !== true) {
+      errors.push(`${ticketPosition(ticket, ticketIndexes)}途中参加チケット「${ticket.name}」: 「オンライン開催する」をONにしてください`);
+    }
+  }
 }
 
 function isAllSessionsTicket(ticket: TicketInfo): boolean {
@@ -471,16 +533,22 @@ function isFixedFeeWithPlanChangeEvent(tickets: TicketInfo[]): boolean {
   if (planChangeTickets.length !== 1 || fixedFeeTickets.length === 0) return false;
   if (fixedFeeTickets.length === 1) return true;
 
-  const expectedPrice = fixedFeeTickets[0].price;
   const expectedTags = ["オン", "オフ", "ハイ", "外"];
-  return expectedPrice !== null
-    && fixedFeeTickets.every((ticket) => ticket.price === expectedPrice)
-    && fixedFeeTickets.every((ticket) => containsAllTags(ticket.visibilityTags, expectedTags));
+  return fixedFeeTickets.every((ticket) => containsAllTags(ticket.visibilityTags, expectedTags));
 }
 
-function validateFixedFeeTickets(tickets: TicketInfo[], errors: string[], ticketIndexes: Map<TicketInfo, number>): void {
+function validateFixedFeeTickets(
+  tickets: TicketInfo[],
+  rules: TicketRule[],
+  errors: string[],
+  ticketIndexes: Map<TicketInfo, number>
+): void {
   const expectedTags = ["オン", "オフ", "ハイ", "外"];
+  const expectedPrices = [...new Set(rules.flatMap((rule) => [rule.price, ...(rule.priceAlternatives ?? [])]))].sort((a, b) => a - b);
   for (const ticket of tickets) {
+    if (!expectedPrices.includes(ticket.price ?? Number.NaN)) {
+      errors.push(`${ticketPosition(ticket, ticketIndexes)}固定費チケットの金額が期待値と異なります。期待: ${expectedPrices.join("円、")}円 / 実際: ${ticket.price ?? "取得できません"}`);
+    }
     if (!containsAllTags(ticket.visibilityTags, expectedTags)) {
       errors.push(`${ticketPosition(ticket, ticketIndexes)}固定費チケットの閲覧権限が不足しています。期待: ${expectedTags.join(",")} / 実際: ${ticket.visibilityTags.join(",") || "取得できません"}`);
     }
