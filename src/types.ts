@@ -1,5 +1,3 @@
-export type EventKind = "online" | "offline" | "hybrid" | "skip";
-
 export type EventListItem = {
   name: string;
   detailUrl: string;
@@ -7,7 +5,6 @@ export type EventListItem = {
 
 export type EventInfo = {
   name: string;
-  kind: EventKind;
   detailUrl: string;
   startAt: Date | null;
   endAt: Date | null;
@@ -16,6 +13,7 @@ export type EventInfo = {
   applicationDeadlineEnabled?: boolean | null;
   applicationDeadline?: string | null;
   tickets: TicketInfo[];
+  fieldAvailability?: Partial<Record<"startAt" | "endAt" | "venue" | "bodyText" | "applicationDeadlineEnabled" | "applicationDeadline" | "tickets", boolean>>;
 };
 
 export type TicketInfo = {
@@ -26,44 +24,5 @@ export type TicketInfo = {
   onlineEnabled: boolean | null;
   onlineUrl: string | null;
   organizerNotice: string | null;
-};
-
-export type TicketRule = {
-  id: string;
-  name: string;
-  note?: string;
-  price: number;
-  priceAlternatives?: number[];
-  visibilityTags: string[];
-};
-
-export type RuleSet = {
-  matchMode: "contains";
-  tickets: TicketRule[];
-};
-
-export type RulesConfig = {
-  online: RuleSet;
-  offline: RuleSet;
-};
-
-export type CheckResult = {
-  eventName: string;
-  kind: EventKind;
-  detailUrl: string;
-  startAt: Date | null;
-  ok: boolean;
-  status?: "unknown";
-  errors: string[];
-};
-
-export type CheckSummary = {
-  targetLabel: string;
-  checkedCount: number;
-  skippedCount: number;
-  okCount: number;
-  ngCount: number;
-  unknownCount?: number;
-  results: CheckResult[];
-  executedAt: Date;
+  fieldAvailability?: Partial<Record<"name" | "price" | "visibility" | "onlineEnabled" | "onlineUrl" | "organizerNotice", boolean>>;
 };

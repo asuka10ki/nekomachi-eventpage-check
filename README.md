@@ -1,143 +1,141 @@
 # 猫町OSIROイベント設定チェックCLI
 
-OSIRO管理画面のイベント一覧からイベント詳細を開き、チケット名、金額、販売対象者、オンライン参加URL、主催者からのお知らせをチェックしてSlackへ投稿するCLIです。
+OSIRO管理画面の募集中イベントを読み取り、イベント設定・本文・各チケット・チケット構成・設定間整合性を検査し、ConsoleとSlackへ結果を通知する読み取り専用CLIです。OSIROのイベントやチケットは変更しません。
+
+## 動作環境
+
+- Node.js 20以上（`package.json`の`engines`が正本）
+- npm
+- Playwright Chromium
+- OSIRO管理画面へログインできるアカウント
+- Slack通知を使う場合は`chat:write`を持つBot
 
 ## セットアップ
 
-Node.js 20以上を使ってください。
-
-```bash
-cp .env.example .env
-cp config/rules.example.yaml config/rules.yaml
-npm install
-npx playwright install
-npm run auth
-npm run check
+```powershell
+npm ci
+npx playwright install chromium
 ```
+
+初回またはログイン期限切れ時は、対話可能な端末で次を実行します。
+
+```powershell
+npm run auth
+```
+
+表示されたブラウザでログインし、完了後にターミナルでEnterを押します。認証状態はプロジェクト直下の`storageState.json`へ保存されます。このファイルにはCookieが含まれるためGit管理・共有・artifact削除の対象にしません。通常のチェック成功時にも、OSIRO側で延長された認証状態を原子的に書き戻します。
 
 ## 環境変数
 
-`.env` に以下を設定します。
+`.env`へ設定します。`.env`自体はGit管理しません。
 
-```env
-SLACK_BOT_TOKEN=xoxb-xxxxxxxxxxxxxxxx
-SLACK_CHANNEL_ID=C0BCXMXG745
-HEADLESS=true
-```
+| 変数 | 必須 | 初期値 | 内容 |
+| --- | --- | --- | --- |
+| `SLACK_BOT_TOKEN` | 本番通知時 | なし | Slack Bot token。ログやartifactへ出力しない |
+| `SLACK_CHANNEL_ID` | 本番通知時 | なし | 通知先チャンネルID |
+| `SLACK_DRY_RUN` | いいえ | `false` | `true`なら本文生成だけを行いSlackへ送信しない |
+| `HEADLESS` | いいえ | `true` | `false`ならチェック用ブラウザを表示する |
+| `ARTIFACT_RETENTION_DAYS` | いいえ | `30` | 障害調査artifactの保存日数。0以上の整数 |
+| `ARTIFACT_CLEANUP_ENABLED` | いいえ | `true` | `false`なら起動時の期限切れartifact削除を停止する |
 
-`HEADLESS=false` にすると、チェック実行時もブラウザを表示します。
+dry-runではSlack設定がなくても実行できます。
 
-## Slack Bot
-
-Slack Appを作成し、Bot Token Scopesに少なくとも `chat:write` を追加してください。プライベートチャンネルへ投稿する場合は、Botを対象チャンネルに追加する必要があります。投稿先は `.env` の `SLACK_CHANNEL_ID` で指定します。
-
-## 初回ログイン
-
-```bash
-npm run auth
-```
-
-Chromiumが表示されるので、OSIRO管理画面へ手動ログインしてください。MFAやSSOがある場合も、画面上で完了できます。ログイン後、ターミナルでEnterを押すと `storageState.json` にログイン状態が保存されます。
-
-`storageState.json` はCookieを含むためGit管理しません。
-
-## チェック実行
-
-```bash
+```powershell
+$env:SLACK_DRY_RUN='true'
+$env:HEADLESS='true'
 npm run check
 ```
 
-`https://nekomachi-club.com/admin/events?state=yet_end` と `https://nekomachi-club.com/admin/events?limit=30&page=2&state=yet_end` を開き、一覧に表示されているイベントを取得します。ページ内の「次へ」も辿り、同じ詳細URLは重複排除します。イベント名に `【予告】` `〖予告〗` `【一覧】` `〖一覧〗` を含むものだけ対象外にします。`満席`、`締切`、`募集中` の表示に関係なくチェックします。
+## コマンド
 
-## Windows タスク スケジューラ
+| コマンド | 用途 |
+| --- | --- |
+| `npm ci` | lockfileどおりのclean install |
+| `npx playwright install chromium` | Chromium導入 |
+| `npm run auth` | 手動ログインと認証状態保存 |
+| `npm run list` | 募集中イベント一覧の読み取り確認 |
+| `npm run check` | 取得・検証・Console表示・Slack通知 |
+| `npm test` | 全単体・統合テスト |
+| `npm run typecheck` | TypeScript型チェック |
+| `npm run lint` | Lint |
+| `npm run build` | `dist/`へビルド |
+| `npm run clean` | TypeScript build成果物のクリーン |
 
-スケジューラに登録する前に、手動で一度ログイン状態を保存してください。
+## 判定結果
 
-```powershell
-npm run auth
-```
+| 結果 | 意味 |
+| --- | --- |
+| `OK` | 適用された業務ルールがすべて正常 |
+| `NG` | OSIROの業務設定に修正が必要 |
+| `UNKNOWN` | 取得・解析・分類不能で、正常か不備かを断定できない |
+| `NG＋UNKNOWN` | 同じイベントに業務不備と判定不能が併存 |
+| `対象外` | 予告・一覧・事務局決済など、イベント全体を検査対象外とした |
+| execution failure | 認証、一覧・詳細取得、状態保存、cleanupなど実行処理が失敗 |
+| notification failure | Slack本文生成後の送信または送信状態保存が失敗 |
 
-このフォルダに `.env` と `storageState.json` がある状態にしてください。
+NGやUNKNOWNがあっても検査自体が最後まで完了すれば終了コードは`0`です。取得・保存・cleanup・Slack通知などの実行失敗は終了コード`1`です。詳細な実行状態は`RunOutcome`へ集約されます。
 
-タスク スケジューラで手動登録する場合は、以下のように設定します。
+## Slack通知と再送
 
-```txt
-プログラム/スクリプト:
-powershell.exe
+Slack本文はイベント境界で3,840文字以下に分割し、全NG・UNKNOWNを順序どおり1回ずつ含めます。各分割の計画、送信済み、未送信、Slack応答`ts`は`logs/slack-notification-progress.json`へ原子的に保存します。
 
-引数の追加:
--NoProfile -ExecutionPolicy Bypass -File "C:\asuka-windows\app\イベントページ自動チェック\scripts\run-check.ps1"
+分割送信の途中で失敗した場合、次回は前回計画の未送信本文だけを先に再送し、送信済み本文を重複投稿しません。送信結果の保存自体に失敗して送達状況を確定できない場合は、自動再送せずnotification failureとして停止します。`SLACK_DRY_RUN=true`では送信状態を変更しません。
 
-開始:
-C:\asuka-windows\app\イベントページ自動チェック
-```
+## 状態ファイルとartifact
 
-PowerShellから毎日実行のタスクを登録する場合は、以下を実行します。
+| 分類 | 保存先 | 自動削除 |
+| --- | --- | --- |
+| Playwright認証状態 | `storageState.json` | しない |
+| 前回取得件数 | `logs/last-successful-event-count.json` | しない |
+| Slack送信状態 | `logs/slack-notification-progress.json` | しない |
+| 実行ログ | `logs/` | artifact削除処理では削除しない |
+| screenshot | `artifacts/screenshots/*.png` | 保存期間超過時だけ |
+| 障害調査HTML | `artifacts/html/*.html` | 保存期間超過時だけ |
+| 障害調査JSON | `artifacts/json/*.json` | 保存期間超過時だけ |
 
-```powershell
-cd "C:\asuka-windows\app\イベントページ自動チェック"
-.\install-task.ps1
-```
+削除対象は上表の既知拡張子だけです。不明なファイル、ディレクトリ、シンボリックリンク、artifactディレクトリ外は削除しません。境界日時と保存期間内のファイルは残します。削除・権限設定の失敗は握りつぶさずexecution failureにします。
 
-デフォルトでは毎日 `00:00` に実行されます。時刻を変える場合は以下のように指定します。
+artifactディレクトリはPOSIX mode `0700`、ファイルは`0600`を設定します。Unix系では所有者以外から読めないことを確認してください。WindowsではPOSIX modeだけでNTFS ACLを完全には表現できないため、運用アカウント専用ディレクトリに配置し、必要に応じてフォルダのプロパティまたは`icacls`で閲覧者を制限してください。
+
+障害調査HTMLではhidden/password値、CSRF token、Slack token、Webhook URLを保存前に除去します。artifactやログをGitへ追加しないでください。
+
+## 料金・販売対象の変更
+
+料金・必須販売対象・rateKeyの唯一の正本は`src/domain/catalog.ts`です。YAMLへ料金を重複定義しません。
+
+変更手順：
+
+1. 業務担当者の確定回答を`docs/外部設計書.md`の業務仕様・回答済み業務確認へ反映する。
+2. `src/domain/catalog.ts`の該当rateKey、金額、販売対象を変更する。
+3. catalogの全金額を固定する料金回帰テストを同じ変更で更新する。
+4. `docs/外部設計書.md`、必要なら`docs/内部設計書.md`を更新する。
+5. `npm run lint`、`npm run typecheck`、`npm test`、`npm run build`、Slack dry-runを実行する。
+
+catalogだけを意図せず変更すると料金回帰テストが失敗します。
+
+## 障害時の確認順
+
+1. Consoleの実行失敗理由と終了コードを確認する。
+2. `storageState.json`が存在するか確認し、ログイン切れなら`npm run auth`を実行する。
+3. 一覧取得件数、HTTPエラー、管理画面DOM識別エラーを確認する。
+4. `artifacts/screenshots/`と秘密情報除去済み`artifacts/html/`を確認する。
+5. `logs/last-successful-event-count.json`と`logs/slack-notification-progress.json`の破損・権限を確認する。
+6. Slackの`not_in_channel`、`missing_scope`、429、5xx、恒久エラーを確認する。
+7. 修正後はdry-runで本文と集計を確認してから本番通知する。
+
+## Windowsタスクスケジューラ
+
+事前に`npm ci`、Chromium導入、`npm run auth`を完了し、プロジェクト直下に`.env`と`storageState.json`を用意します。
 
 ```powershell
 .\install-task.ps1 -Time "09:00"
 ```
 
-手動実行する場合は、プロジェクト直下の `run-check.bat` をダブルクリックするか、以下を実行します。
+手動実行は`.\run-check.bat`、登録スクリプトは`scripts/run-check.ps1`を使用します。
 
-```powershell
-.\run-check.bat
-```
+## 業務仕様・設計の正本
 
-実行ログは `logs/` に保存されます。成功時は終了コード `0`、失敗時は終了コード `1` で終了します。
+- `docs/外部設計書.md`：利用者向け仕様、全チェックルール、適用表、回答済み業務判断
+- `docs/内部設計書.md`：実装構成、処理方式、実装判断、レビュー・完了履歴
 
-登録タスクは「タスクを実行するためにスリープを解除する」を有効にします。PC側の電源設定でスリープ解除タイマーが無効になっている場合は、Windowsの電源オプションでスリープ解除タイマーを有効にしてください。
-
-## rules.yaml
-
-`config/rules.yaml` でオンライン、オフラインそれぞれの期待チケットを定義します。原則として1チケットにつき販売対象者は1つです。
-
-```yaml
-visibilityTags: ["オン"]
-visibilityTags: ["オフ"]
-visibilityTags: ["ハイ"]
-visibilityTags: ["外"]
-```
-
-`visibilityTags: ["オフ", "オン"]` のように複数会員種別を1つの期待チケットにまとめないでください。
-
-## チェック内容
-
-イベント種別はイベント名だけで判定します。`〖〗` は `【】` と同じ意味として扱います。`【東京】` `【大阪】` `【京都】` `【福岡】` `【名古屋】` はオフライン、それ以外はオンラインです。
-
-オンラインイベントでは、チケット名、課題本名、金額、販売対象者に加えて、オンライン開催ONのチケットのURL一致、全チケットの主催者お知らせ一致、お知らせ内の `XX:XXまでに` が開始5分前かを確認します。
-
-オフラインイベントでは、チケット名、課題本名、金額、販売対象者を確認します。
-
-## よくあるエラー
-
-`storageState.json がありません`
-
-先に `npm run auth` を実行してください。
-
-`Slack投稿に失敗しました: not_in_channel`
-
-Botを投稿先チャンネルに追加してください。
-
-`Slack投稿に失敗しました: missing_scope`
-
-Slack AppのBot Token Scopesに `chat:write` を追加し、再インストールしてください。
-
-`詳細取得失敗`
-
-画面構造が想定と違う、またはログイン期限切れの可能性があります。`artifacts/screenshots/` と `artifacts/html/` に保存されたファイルを確認してください。
-
-## テスト
-
-```bash
-npm test
-```
-
-分類、正規化、金額変換、課題本名抽出、URL正規化、締切時刻チェックのユニットテストを実行します。
+設計資料の正本はこの2冊だけです。業務仕様変更時は外部設計書、内部設計書、catalog、テストを同じ変更で同期します。

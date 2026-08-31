@@ -1,35 +1,40 @@
 import fs from "node:fs";
-import path from "node:path";
-import YAML from "yaml";
-import type { RulesConfig } from "./types.js";
 
 export const EVENT_LIST_URL = "https://nekomachi-club.com/admin/events?state=yet_end";
-export const EVENT_LIST_URLS = [
-  EVENT_LIST_URL,
-  "https://nekomachi-club.com/admin/events?limit=30&page=2&state=yet_end"
-];
 export const STORAGE_STATE_PATH = "storageState.json";
 
 export type AppEnv = {
   slackBotToken?: string;
   slackChannelId: string;
+  slackDryRun?: boolean;
   headless: boolean;
+  artifactRetentionDays?: number;
+  artifactCleanupEnabled?: boolean;
 };
 
 export function loadEnv(): AppEnv {
   loadDotEnvFile();
   return {
     slackBotToken: process.env.SLACK_BOT_TOKEN,
-    slackChannelId: process.env.SLACK_CHANNEL_ID || "C0BCXMXG745",
-    headless: (process.env.HEADLESS || "true").toLowerCase() !== "false"
+    slackChannelId: process.env.SLACK_CHANNEL_ID || "",
+    slackDryRun: (process.env.SLACK_DRY_RUN || "false").toLowerCase() === "true",
+    headless: (process.env.HEADLESS || "true").toLowerCase() !== "false",
+    artifactRetentionDays: parseNonNegativeInteger(process.env.ARTIFACT_RETENTION_DAYS, 30, "ARTIFACT_RETENTION_DAYS"),
+    artifactCleanupEnabled: (process.env.ARTIFACT_CLEANUP_ENABLED || "true").toLowerCase() !== "false"
   };
 }
 
-export function loadRules(filePath = path.join("config", "rules.yaml")): RulesConfig {
-  const raw = fs.readFileSync(filePath, "utf8");
-  const parsed = YAML.parse(raw) as RulesConfig;
-  validateRules(parsed);
+function parseNonNegativeInteger(value: string | undefined, fallback: number, name: string): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) throw new Error(`${name} は0以上の整数で指定してください`);
   return parsed;
+}
+
+export function validateOperationalConfig(env: AppEnv): void {
+  if (env.slackDryRun) return;
+  if (!env.slackBotToken?.trim()) throw new Error("SLACK_BOT_TOKEN が未設定です");
+  if (!env.slackChannelId.trim()) throw new Error("SLACK_CHANNEL_ID が未設定です");
 }
 
 function loadDotEnvFile(filePath = ".env"): void {
@@ -43,16 +48,5 @@ function loadDotEnvFile(filePath = ".env"): void {
     const key = trimmed.slice(0, index).trim();
     const value = trimmed.slice(index + 1).trim().replace(/^['"]|['"]$/g, "");
     if (!process.env[key]) process.env[key] = value;
-  }
-}
-
-function validateRules(config: RulesConfig): void {
-  for (const kind of ["online", "offline"] as const) {
-    if (!config[kind]?.tickets?.length) throw new Error(`config/rules.yaml の ${kind}.tickets が空です`);
-    for (const ticket of config[kind].tickets) {
-      if (ticket.visibilityTags.length !== 1) {
-        throw new Error(`チケットルール ${ticket.id} の visibilityTags は1要素にしてください`);
-      }
-    }
   }
 }

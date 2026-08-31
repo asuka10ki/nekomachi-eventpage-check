@@ -1,10 +1,29 @@
 import type { BrowserContext, Locator, Page } from "playwright";
 import type { EventInfo, EventListItem, TicketInfo } from "./types.js";
-import { classifyEventByName } from "./utils/classify.js";
 import { normalizePriceText, normalizeVisibilityTags } from "./utils/normalize.js";
+import { matchedExcludedEventNameMarkers } from "./domain/eligibility.js";
 import { parseJapaneseDateTime } from "./utils/date.js";
+import {
+  AcquisitionError,
+  assertAdminEventDetailPageState,
+  assertAdminEventListPageState,
+  assertAdminSessionIsValid,
+  assertPageLimitNotExceeded,
+  assertPaginationAdvanced,
+  assertSuccessfulHttpResponse
+} from "./acquisition/quality.js";
 
-type RawAdminEventFormData = {
+export {
+  assertCollectedEventsExist,
+  assertAdminEventDetailPageState,
+  assertAdminEventListPageState,
+  assertAdminSessionIsValid,
+  assertPageLimitNotExceeded,
+  assertPaginationAdvanced,
+  assertSuccessfulHttpResponse
+} from "./acquisition/quality.js";
+
+export type RawAdminEventFormData = {
   title: string | null;
   startAtText: string | null;
   endAtText: string | null;
@@ -12,6 +31,7 @@ type RawAdminEventFormData = {
   bodyText: string | null;
   applicationDeadlineEnabled: boolean | null;
   applicationDeadline: string | null;
+  availability: Record<string, boolean>;
   tickets: {
     name: string;
     priceText: string;
@@ -19,6 +39,7 @@ type RawAdminEventFormData = {
     onlineEnabled: boolean | null;
     onlineUrl: string | null;
     organizerNotice: string | null;
+    availability: Record<string, boolean>;
   }[];
 };
 
@@ -31,70 +52,106 @@ export async function collectEventList(page: Page, listUrl: string): Promise<Eve
   return dedupeByUrl(items);
 }
 
-export async function collectEventListWithPagination(page: Page, listUrl: string): Promise<EventListItem[]> {
+export async function collectEventListWithPagination(page: Page, listUrl: string, maxPages = 20): Promise<EventListItem[]> {
   const response = await page.goto(listUrl, { waitUntil: "domcontentloaded" });
   assertSuccessfulHttpResponse(page.url(), response?.status() ?? null, response?.ok() ?? false);
   assertAdminSessionIsValid(page.url());
   const all: EventListItem[] = [];
-  for (let i = 0; i < 20; i += 1) {
+  const visitedPages = new Set<string>();
+  for (let pageIndex = 1; ; pageIndex += 1) {
     await assertAdminEventListPage(page);
+    const currentPageUrl = canonicalPageUrl(page.url());
+    if (visitedPages.has(currentPageUrl)) {
+      throw new AcquisitionError("QUAL-LIST-004", "OSIROのイベント一覧でページングの循環を検出しました。");
+    }
+    visitedPages.add(currentPageUrl);
     all.push(...(await collectCurrentPageEvents(page)));
     const next = page.getByRole("link", { name: /次へ|Next/i }).or(page.getByRole("button", { name: /次へ|Next/i }));
     if ((await next.count()) === 0 || !(await next.first().isEnabled())) break;
-    if (i === 19) {
-      throw new Error("OSIROのイベント一覧が20ページを超えたため、全ページを取得できませんでした。");
-    }
+    assertPageLimitNotExceeded(pageIndex, maxPages);
 
     const previousUrl = page.url();
-    const [navigationResponse] = await Promise.all([
-      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30000 }),
-      next.first().click()
-    ]);
+    const nextHref = await next.first().getAttribute("href");
+    if (nextHref && visitedPages.has(canonicalPageUrl(new URL(nextHref, previousUrl).toString()))) {
+      throw new AcquisitionError("QUAL-LIST-004", "OSIROのイベント一覧で同じ次ページURLが再指定されました。");
+    }
+    const navigationResponse = nextHref
+      ? await page.goto(new URL(nextHref, previousUrl).toString(), { waitUntil: "domcontentloaded", timeout: 30000 })
+      : (await Promise.all([
+        page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 30000 }),
+        next.first().click()
+      ]))[0];
     assertSuccessfulHttpResponse(page.url(), navigationResponse?.status() ?? null, navigationResponse?.ok() ?? false);
     assertAdminSessionIsValid(page.url());
-    if (page.url() === previousUrl) {
-      throw new Error("OSIROのイベント一覧で次ページへ移動できませんでした。");
-    }
+    assertPaginationAdvanced(previousUrl, page.url());
   }
   return dedupeByUrl(all);
 }
 
-export function assertAdminSessionIsValid(currentUrl: string): void {
-  const pathname = new URL(currentUrl).pathname;
-  if (pathname === "/login" || pathname.startsWith("/login/")) {
-    throw new Error("OSIROのログイン状態が期限切れです。npm run auth を実行してログイン状態を更新してください。");
-  }
-}
-
-export async function collectEventListsWithPagination(page: Page, listUrls: string[]): Promise<EventListItem[]> {
-  const all: EventListItem[] = [];
-  for (const listUrl of listUrls) {
-    all.push(...(await collectEventListWithPagination(page, listUrl)));
-  }
-  const events = dedupeByUrl(all);
-  assertCollectedEventsExist(events);
-  return events;
+export async function collectEventListsWithPagination(page: Page, listUrl: string, maxPages = 20): Promise<EventListItem[]> {
+  return collectEventListWithPagination(page, listUrl, maxPages);
 }
 
 export async function fetchEventInfo(context: BrowserContext, item: EventListItem): Promise<EventInfo> {
   const page = await context.newPage();
   try {
-    const response = await page.goto(item.detailUrl, { waitUntil: "networkidle", timeout: 60000 });
-    assertSuccessfulHttpResponse(page.url(), response?.status() ?? null, response?.ok() ?? false);
-    assertAdminSessionIsValid(page.url());
-    await assertAdminEventDetailPage(page);
+    return await fetchEventInfoFromPage(page, item);
+  } finally {
+    await page.close();
+  }
+}
 
-    const formData = await extractAdminEventFormData(page);
-    const name = formData.name || (await getFieldText(page, ["イベント名", "タイトル"])) || item.name;
-    const startText = formData.startAtText || (await getFieldText(page, ["開始日時", "開始日", "開催日時"]));
-    const endText = formData.endAtText || (await getFieldText(page, ["終了日時", "終了日"]));
-    const tickets = formData.tickets.length > 0 ? formData.tickets : await collectTickets(page);
-    const venue = formData.venue || await getFieldText(page, ["会場"]);
-    const applicationDeadlineEnabled = formData.applicationDeadlineEnabled ?? await getBooleanField(page, ["締切を設定する"]);
-    const applicationDeadline = formData.applicationDeadline || await getFieldText(page, ["申込締切", "申し込み締切", "申込み締切"]);
+export type DetailWaitOptions = {
+  navigationTimeoutMs?: number;
+  domTimeoutMs?: number;
+};
+
+export async function fetchEventInfoFromPage(page: Page, item: EventListItem, options: DetailWaitOptions = {}): Promise<EventInfo> {
+    const navigationTimeoutMs = options.navigationTimeoutMs ?? 30000;
+    const domTimeoutMs = options.domTimeoutMs ?? 15000;
+    const response = await page.goto(item.detailUrl, { waitUntil: "domcontentloaded", timeout: navigationTimeoutMs });
+    assertSuccessfulHttpResponse(page.url(), response?.status() ?? null, response?.ok() ?? false, "event");
+    assertAdminSessionIsValid(page.url(), "event");
+    await waitForAdminEventDetailIdentity(page, domTimeoutMs);
+
+    const detailTitle = await page.locator("#title").inputValue().catch(() => "");
+    const normalizedTitle = detailTitle.trim();
+    if (!normalizedTitle || matchedExcludedEventNameMarkers(normalizedTitle).length > 0) {
+      return {
+        name: normalizedTitle,
+        detailUrl: item.detailUrl,
+        startAt: null,
+        endAt: null,
+        venue: null,
+        bodyText: undefined,
+        applicationDeadlineEnabled: undefined,
+        applicationDeadline: undefined,
+        tickets: [],
+        fieldAvailability: {
+          startAt: false,
+          endAt: false,
+          venue: false,
+          bodyText: false,
+          applicationDeadlineEnabled: false,
+          applicationDeadline: false,
+          tickets: false
+        }
+      };
+    }
+
+    await waitForAdminEventForm(page, domTimeoutMs);
+    await waitForTicketRegion(page, domTimeoutMs);
+
+    const formData = await extractEventFormDataWithTicketFallback(page);
+    const name = formData.name ?? item.name;
+    const startText = formData.startAtText;
+    const endText = formData.endAtText;
+    const tickets = formData.tickets;
+    const venue = formData.venue;
+    const applicationDeadlineEnabled = formData.applicationDeadlineEnabled;
+    const applicationDeadline = formData.applicationDeadline;
     return {
       name,
-      kind: classifyEventKind(name || item.name, venue),
       detailUrl: item.detailUrl,
       startAt: startText ? parseJapaneseDateTime(startText) : null,
       endAt: endText ? parseJapaneseDateTime(endText) : null,
@@ -102,39 +159,17 @@ export async function fetchEventInfo(context: BrowserContext, item: EventListIte
       bodyText: formData.bodyText,
       applicationDeadlineEnabled,
       applicationDeadline,
-      tickets
+      tickets,
+      fieldAvailability: {
+        startAt: formData.availability.startAt,
+        endAt: formData.availability.endAt,
+        venue: formData.availability.venue,
+        bodyText: formData.availability.bodyText,
+        applicationDeadlineEnabled: formData.availability.applicationDeadlineEnabled,
+        applicationDeadline: formData.availability.applicationDeadline,
+        tickets: formData.availability.tickets
+      }
     };
-  } finally {
-    await page.close();
-  }
-}
-
-export function assertCollectedEventsExist(events: EventListItem[]): void {
-  if (events.length === 0) {
-    throw new Error("OSIROの募集中イベントを1件も取得できませんでした。一覧画面の読み込みまたは画面構造を確認してください。");
-  }
-}
-
-export function assertSuccessfulHttpResponse(url: string, status: number | null, ok: boolean): void {
-  if (status === null || !ok) {
-    throw new Error(`OSIROへのアクセスに失敗しました。HTTPステータス: ${status ?? "取得不能"} / URL: ${url}`);
-  }
-}
-
-export function assertAdminEventListPageState(currentUrl: string, hasEventIndex: boolean): void {
-  assertAdminSessionIsValid(currentUrl);
-  const pathname = new URL(currentUrl).pathname;
-  if (pathname !== "/admin/events" || !hasEventIndex) {
-    throw new Error("OSIROのイベント一覧画面を確認できませんでした。画面構造またはアクセス権限を確認してください。");
-  }
-}
-
-export function assertAdminEventDetailPageState(currentUrl: string, hasTitle: boolean, ticketCount: number): void {
-  assertAdminSessionIsValid(currentUrl);
-  const pathname = new URL(currentUrl).pathname;
-  if (!/^\/admin_events\/[^/]+\/edit$/.test(pathname) || !hasTitle || ticketCount === 0) {
-    throw new Error("OSIROのイベント詳細画面からタイトルまたはチケット欄を取得できませんでした。");
-  }
 }
 
 async function assertAdminEventListPage(page: Page): Promise<void> {
@@ -143,36 +178,90 @@ async function assertAdminEventListPage(page: Page): Promise<void> {
   assertAdminEventListPageState(page.url(), (await eventIndex.count()) > 0);
 }
 
-async function assertAdminEventDetailPage(page: Page): Promise<void> {
+async function waitForAdminEventDetailIdentity(page: Page, timeoutMs: number): Promise<void> {
   const title = page.locator("#title");
-  const ticketNames = page.locator("[name='event_ticket_name']");
-  await title.waitFor({ state: "attached", timeout: 15000 }).catch(() => undefined);
-  await ticketNames.first().waitFor({ state: "attached", timeout: 15000 }).catch(() => undefined);
-  assertAdminEventDetailPageState(page.url(), (await title.count()) > 0, await ticketNames.count());
+  let ready = false;
+  try {
+    await title.waitFor({ state: "attached", timeout: timeoutMs });
+    await page.waitForFunction(() => {
+      const control = document.querySelector("#title");
+      return (control instanceof HTMLInputElement || control instanceof HTMLTextAreaElement) && control.value.trim().length > 0;
+    }, undefined, { timeout: timeoutMs });
+    ready = true;
+  } catch {
+    // 下の品質判定へ集約し、ログイン切れと必須DOM変更を同じ空データにしない。
+  }
+  assertAdminEventDetailPageState(page.url(), ready);
 }
 
-function classifyEventKind(eventName: string, venue: string | null): EventInfo["kind"] {
-  const kind = classifyEventByName(eventName);
-  if (kind === "skip") return kind;
-  if (isHybridVenue(venue)) return "hybrid";
-  return kind;
+async function waitForAdminEventForm(page: Page, timeoutMs: number): Promise<void> {
+  // OSIROの編集画面は、入力欄一式を必ずしも<form>要素で囲まない。
+  // 抽出処理が実際に必要とするコントロールと値を、イベント設定領域の描画完了条件とする。
+  try {
+    await page.waitForFunction(() => {
+      const datetimes = Array.from(document.querySelectorAll("input[type='datetime-local']"));
+      const firstTwoDatesReady = datetimes.length >= 2 && datetimes.slice(0, 2).every((control) => control instanceof HTMLInputElement && control.value.trim().length > 0);
+      return firstTwoDatesReady
+        && document.querySelector("#editEvent_venue") !== null
+        && document.querySelector("textarea[name='body'], textarea[name='content'], input[name='body'], input[name='content']") !== null;
+    }, undefined, { timeout: timeoutMs });
+  } catch {
+    throw new AcquisitionError(
+      "QUAL-DETAIL-004",
+      `OSIROのイベント詳細画面でイベントフォームが${timeoutMs}ms以内に表示されませんでした。`,
+      "event"
+    );
+  }
 }
 
-function isHybridVenue(venue: string | null): boolean {
-  return /オフ会場\s*[+＋]\s*オンライン/.test(venue ?? "");
+async function waitForTicketRegion(page: Page, timeoutMs: number): Promise<void> {
+  const ticketRegion = page.locator(
+    "#event_tickets, #eventTickets, [data-ticket-container], .event-tickets, [data-testid='event-tickets'], input[name='event_ticket_name']"
+  ).first();
+  try {
+    await ticketRegion.waitFor({ state: "attached", timeout: timeoutMs });
+  } catch {
+    throw new AcquisitionError(
+      "QUAL-DETAIL-005",
+      `OSIROのイベント詳細画面でチケット領域が${timeoutMs}ms以内に表示されませんでした。`,
+      "event"
+    );
+  }
+
+  try {
+    await page.waitForFunction(() => {
+      const controls = Array.from(document.querySelectorAll("input, textarea, select"));
+      const ticketIndexes = controls
+        .map((control, index) => ({ control, index }))
+        .filter(({ control }) => control.getAttribute("name") === "event_ticket_name")
+        .map(({ index }) => index);
+      if (ticketIndexes.length === 0) return false;
+
+      return ticketIndexes.every((startIndex, ticketIndex) => {
+        const endIndex = ticketIndexes[ticketIndex + 1] ?? Number.POSITIVE_INFINITY;
+        const group = controls.slice(startIndex, endIndex);
+        const name = group.find((control) => control.getAttribute("name") === "event_ticket_name");
+        const nameReady = (name instanceof HTMLInputElement || name instanceof HTMLTextAreaElement) && name.value.trim().length > 0;
+        const paymentSelect = group.find((control) => control instanceof HTMLSelectElement && /無料|事前決済/.test(Array.from(control.selectedOptions).map((option) => option.textContent ?? "").join(",")));
+        const priceReady = group.some((control) => control.getAttribute("placeholder") === "半角、コンマなし") || paymentSelect !== undefined;
+        const onlineReady = group.some((control) => control.id.startsWith("is_online_"));
+        const visibilityReady = group.some((control) => control instanceof HTMLSelectElement
+          && control !== paymentSelect
+          && !/アンケート/.test(Array.from(control.selectedOptions).map((option) => option.textContent ?? "").join(","))
+          && Array.from(control.selectedOptions).some((option) => (option.textContent ?? "").trim().length > 0));
+        return nameReady && priceReady && onlineReady && visibilityReady;
+      });
+    }, undefined, { timeout: timeoutMs });
+  } catch {
+    throw new AcquisitionError(
+      "QUAL-DETAIL-006",
+      `OSIROのイベント詳細画面でチケットの必須項目が${timeoutMs}ms以内に取得可能になりませんでした。`,
+      "event"
+    );
+  }
 }
 
-async function extractAdminEventFormData(page: Page): Promise<{
-  name: string | null;
-  startAtText: string | null;
-  endAtText: string | null;
-  venue: string | null;
-  bodyText: string | null;
-  applicationDeadlineEnabled: boolean | null;
-  applicationDeadline: string | null;
-  tickets: TicketInfo[];
-}> {
-  const raw = await page.evaluate(`(() => {
+export const ADMIN_EVENT_FORM_EVALUATION_SCRIPT = `(() => {
     const controls = Array.from(document.querySelectorAll("input, textarea, select"));
     const valueOf = (el) => {
       if (el instanceof HTMLSelectElement) return Array.from(el.selectedOptions).map((option) => option.textContent?.trim() ?? "").join(",");
@@ -196,38 +285,51 @@ async function extractAdminEventFormData(page: Page): Promise<{
       checked: el instanceof HTMLInputElement ? el.checked : false
     }));
 
-    const title = controlInfo.find((control) => control.id === "title")?.value ?? null;
-    const datetimes = controlInfo.filter((control) => control.type === "datetime-local").map((control) => control.value);
-    const venue = controlInfo.find((control) => control.id === "editEvent_venue")?.value ?? null;
+    const titleControl = controlInfo.find((control) => control.id === "title");
+    const title = titleControl?.value ?? null;
+    const datetimeControls = controlInfo.filter((control) => control.type === "datetime-local");
+    const datetimes = datetimeControls.map((control) => control.value);
+    const venueControl = controlInfo.find((control) => control.id === "editEvent_venue");
+    const venue = venueControl?.value ?? null;
     const htmlToText = (html) => {
       const container = document.createElement("div");
       container.innerHTML = String(html)
         .replace(/<br\\s*\\/?>/gi, "\\n")
         .replace(/<\\/(p|div|li|h[1-6]|tr)>/gi, "\\n");
-      return (container.textContent ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+      return (container.textContent ?? "")
+        .replace(/\\u00a0/g, " ")
+        .replace(/[ \\t\\f\\v]+/g, " ")
+        .replace(/\\n\\s*\\n+/g, "\\n")
+        .trim();
     };
-    const bodyHtml = controlInfo.find((control) => control.name === "body")?.value
-      ?? controlInfo.find((control) => control.name === "content")?.value
-      ?? null;
-    const bodyText = bodyHtml ? htmlToText(bodyHtml) : null;
-    const applicationDeadlineEnabled = controlInfo.find((control) => control.id === "editEvent_reservation")?.checked ?? null;
-    const applicationDeadline = controlInfo.find((control) => /申込締切|申し込み締切|申込み締切/.test([control.name, control.id, control.placeholder, control.labelText].join(" ")))?.value
-      ?? datetimes[2]
-      ?? null;
+    const bodyControl = controlInfo.find((control) => control.name === "body") ?? controlInfo.find((control) => control.name === "content");
+    const bodyHtml = bodyControl?.value ?? null;
+    const bodyText = bodyHtml === null ? null : htmlToText(bodyHtml);
+    const deadlineEnabledControl = controlInfo.find((control) => control.id === "editEvent_reservation");
+    const applicationDeadlineEnabled = deadlineEnabledControl?.checked ?? null;
+    const deadlineControl = controlInfo.find((control) => /申込締切|申し込み締切|申込み締切/.test([control.name, control.id, control.placeholder, control.labelText].join(" ")));
+    const applicationDeadline = deadlineControl?.value ?? datetimes[2] ?? null;
     const ticketNameIndexes = controlInfo
       .filter((control) => control.name === "event_ticket_name")
       .map((control) => control.index);
+    const ticketContainerAvailable = ticketNameIndexes.length > 0 || Boolean(
+      document.querySelector("#event_tickets, #eventTickets, [data-ticket-container], .event-tickets, [data-testid='event-tickets']")
+    );
 
     const tickets = ticketNameIndexes.map((startIndex, ticketIndex) => {
       const endIndex = ticketNameIndexes[ticketIndex + 1] ?? Number.POSITIVE_INFINITY;
       const group = controlInfo.filter((control) => control.index >= startIndex && control.index < endIndex);
-      const name = group.find((control) => control.name === "event_ticket_name")?.value ?? "";
+      const nameControl = group.find((control) => control.name === "event_ticket_name");
+      const name = nameControl?.value ?? "";
       const payment = group.find((control) => control.tag === "select" && /無料|事前決済/.test(control.value))?.value ?? "";
       const priceControl = group.find((control) => control.placeholder === "半角、コンマなし");
       const onlineControl = group.find((control) => control.id.startsWith("is_online_"));
-      const onlineUrl = group.find((control) => control.placeholder.includes("YouTubeライブ") || control.placeholder.includes("Zoom"))?.value ?? null;
-      const organizerNotice = group.find((control) => control.tag === "textarea" && control.placeholder.includes("参加方法"))?.value ?? null;
-      const visibility = group.find((control) => control.tag === "select" && !/無料|事前決済|アンケート/.test(control.value))?.value ?? null;
+      const onlineUrlControl = group.find((control) => control.placeholder.includes("YouTubeライブ") || control.placeholder.includes("Zoom"));
+      const organizerNoticeControl = group.find((control) => control.tag === "textarea" && control.placeholder.includes("参加方法"));
+      const visibilityControl = group.find((control) => control.tag === "select" && !/無料|事前決済|アンケート/.test(control.value));
+      const onlineUrl = onlineUrlControl?.value ?? null;
+      const organizerNotice = organizerNoticeControl?.value ?? null;
+      const visibility = visibilityControl?.value ?? null;
 
       return {
         name,
@@ -235,7 +337,15 @@ async function extractAdminEventFormData(page: Page): Promise<{
         visibility,
         onlineEnabled: onlineControl ? onlineControl.checked : null,
         onlineUrl,
-        organizerNotice
+        organizerNotice,
+        availability: {
+          name: Boolean(nameControl),
+          price: Boolean(priceControl) || payment === "無料",
+          visibility: Boolean(visibilityControl),
+          onlineEnabled: Boolean(onlineControl),
+          onlineUrl: Boolean(onlineUrlControl),
+          organizerNotice: Boolean(organizerNoticeControl)
+        }
       };
     });
 
@@ -247,9 +357,34 @@ async function extractAdminEventFormData(page: Page): Promise<{
       bodyText,
       applicationDeadlineEnabled,
       applicationDeadline,
+      availability: {
+        title: Boolean(titleControl),
+        startAt: datetimeControls.length >= 1,
+        endAt: datetimeControls.length >= 2,
+        venue: Boolean(venueControl),
+        bodyText: Boolean(bodyControl),
+        applicationDeadlineEnabled: Boolean(deadlineEnabledControl),
+        applicationDeadline: Boolean(deadlineControl) || datetimeControls.length >= 3,
+        tickets: ticketContainerAvailable
+      },
       tickets
     };
-  })()`) as RawAdminEventFormData;
+  })()`;
+
+export type ExtractedAdminEventFormData = {
+  name: string | null;
+  startAtText: string | null;
+  endAtText: string | null;
+  venue: string | null;
+  bodyText: string | null;
+  applicationDeadlineEnabled: boolean | null;
+  applicationDeadline: string | null;
+  tickets: TicketInfo[];
+  availability: Record<string, boolean>;
+};
+
+export async function extractAdminEventFormData(page: Page): Promise<ExtractedAdminEventFormData> {
+  const raw = await page.evaluate(ADMIN_EVENT_FORM_EVALUATION_SCRIPT) as RawAdminEventFormData;
 
   return {
     name: raw.title,
@@ -259,6 +394,7 @@ async function extractAdminEventFormData(page: Page): Promise<{
     bodyText: raw.bodyText,
     applicationDeadlineEnabled: raw.applicationDeadlineEnabled,
     applicationDeadline: raw.applicationDeadline,
+    availability: raw.availability,
     tickets: raw.tickets.map((ticket) => ({
       name: ticket.name,
       price: normalizePriceText(ticket.priceText),
@@ -266,8 +402,31 @@ async function extractAdminEventFormData(page: Page): Promise<{
       visibilityTags: normalizeVisibilityTags(ticket.visibility ? [ticket.visibility] : []),
       onlineEnabled: ticket.onlineEnabled,
       onlineUrl: ticket.onlineUrl,
-      organizerNotice: ticket.organizerNotice
+      organizerNotice: ticket.organizerNotice,
+      fieldAvailability: {
+        name: ticket.availability.name,
+        price: ticket.availability.price,
+        visibility: ticket.availability.visibility,
+        onlineEnabled: ticket.availability.onlineEnabled,
+        onlineUrl: ticket.availability.onlineUrl,
+        organizerNotice: ticket.availability.organizerNotice
+      }
     }))
+  };
+}
+
+export async function extractEventFormDataWithTicketFallback(page: Page): Promise<ExtractedAdminEventFormData> {
+  const primary = await extractAdminEventFormData(page);
+  if (primary.tickets.length > 0) return { ...primary, availability: { ...primary.availability, tickets: true } };
+
+  const fallback = await collectTickets(page);
+  if (fallback.tickets.length > 0) {
+    return { ...primary, tickets: fallback.tickets, availability: { ...primary.availability, tickets: true } };
+  }
+  return {
+    ...primary,
+    tickets: [],
+    availability: { ...primary.availability, tickets: Boolean(primary.availability.tickets || fallback.containerAvailable) }
   };
 }
 
@@ -275,7 +434,7 @@ export async function collectCurrentPageEvents(page: Page): Promise<EventListIte
   return dedupeByUrl(await findEventLinksInScope(page, page.url()));
 }
 
-async function collectTickets(page: Page): Promise<TicketInfo[]> {
+async function collectTickets(page: Page): Promise<{ tickets: TicketInfo[]; containerAvailable: boolean }> {
   const cards = await findTicketCards(page);
   const tickets: TicketInfo[] = [];
   const count = await cards.count();
@@ -288,10 +447,18 @@ async function collectTickets(page: Page): Promise<TicketInfo[]> {
       visibilityTags: normalizeVisibilityTags(await getVisibilityTexts(card)),
       onlineEnabled: await getBooleanField(card, ["オンライン開催する"]),
       onlineUrl: await getFieldText(card, ["オンライン参加URL", "参加URL", "Zoom URL"]),
-      organizerNotice: await getFieldText(card, ["主催者からのお知らせ", "お知らせ"])
+      organizerNotice: await getFieldText(card, ["主催者からのお知らせ", "お知らせ"]),
+      fieldAvailability: {
+        name: (await card.getByText("チケット名", { exact: false }).count()) > 0,
+        price: (await card.getByText(/金額|価格/, { exact: false }).count()) > 0,
+        visibility: (await card.getByText("販売対象者", { exact: false }).count()) > 0,
+        onlineEnabled: (await card.getByText("オンライン開催する", { exact: false }).count()) > 0,
+        onlineUrl: (await card.getByText(/オンライン参加URL|参加URL|Zoom URL/, { exact: false }).count()) > 0,
+        organizerNotice: (await card.getByText(/主催者からのお知らせ|お知らせ/, { exact: false }).count()) > 0
+      }
     });
   }
-  return tickets;
+  return { tickets, containerAvailable: count > 0 };
 }
 
 async function findTicketCards(page: Page): Promise<Locator> {
@@ -362,12 +529,31 @@ async function inputValue(locator: Locator): Promise<string | null> {
 function dedupeByUrl(items: EventListItem[]): EventListItem[] {
   const byUrl = new Map<string, EventListItem>();
   for (const item of items) {
-    const current = byUrl.get(item.detailUrl);
+    const key = canonicalEventUrl(item.detailUrl);
+    const current = byUrl.get(key);
     if (!current || scoreEventLink(item) > scoreEventLink(current)) {
-      byUrl.set(item.detailUrl, item);
+      byUrl.set(key, { ...item, detailUrl: key });
     }
   }
   return [...byUrl.values()];
+}
+
+function canonicalEventUrl(value: string): string {
+  const url = new URL(value);
+  url.hash = "";
+  url.search = "";
+  return url.toString();
+}
+
+function canonicalPageUrl(value: string): string {
+  const url = new URL(value);
+  url.hash = "";
+  const entries = [...url.searchParams.entries()].sort(([leftKey, leftValue], [rightKey, rightValue]) =>
+    leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue)
+  );
+  url.search = "";
+  for (const [key, entryValue] of entries) url.searchParams.append(key, entryValue);
+  return url.toString();
 }
 
 async function findEventLinksInScope(scope: Page | Locator, baseUrl: string): Promise<EventListItem[]> {
