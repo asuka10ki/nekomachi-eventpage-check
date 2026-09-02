@@ -10,6 +10,7 @@ export function buildRulePlans(derived: DerivedEvent): RulePlan[] {
   const { attributes, sets } = derived;
   const delivery = attributes.deliveryMode.state === "determined" ? attributes.deliveryMode.value : undefined;
   const pricingMode = attributes.pricingMode.state === "determined" ? attributes.pricingMode.value : undefined;
+  const fixedFeeType = attributes.fixedFeeType.state === "determined" ? attributes.fixedFeeType.value : undefined;
   const pricingScheme = attributes.pricingScheme.state === "determined" ? attributes.pricingScheme.value : undefined;
   const applied = attributes.appliedComposition.state === "determined" ? attributes.appliedComposition.value : undefined;
   const allApplied = applied === "already-applied-only";
@@ -23,7 +24,13 @@ export function buildRulePlans(derived: DerivedEvent): RulePlan[] {
   add(plans, eventId, "BODY-002", bodyRecurrenceApplicability(derived, /(?<![0-9])2回目/));
   add(plans, eventId, "BODY-003", bodyFeeApplicability(derived, delivery === "online" && normalConfiguration && pricingScheme === "normal", [attributes.deliveryMode, attributes.pricingMode, attributes.pricingScheme], "通常オンライン本文料金ではないため"));
   add(plans, eventId, "BODY-004", bodyFeeApplicability(derived, (delivery === "offline" || delivery === "hybrid") && normalConfiguration && pricingScheme === "normal", [attributes.deliveryMode, attributes.pricingMode, attributes.pricingScheme], "通常オフライン料金ではないため"));
-  add(plans, eventId, "AREA-001", attributePlan((delivery === "online" || delivery === "hybrid") && !allApplied && noticeCandidates.length > 0, [attributes.deliveryMode, attributes.appliedComposition], "比較可能なオンライン案内券がないため"));
+  const receptionCandidates = receptionNoticeTargets(derived);
+  const receptionBase = (delivery === "online" || delivery === "hybrid") && !allApplied;
+  add(plans, eventId, "AREA-001", !receptionBase
+    ? attributePlan(false, [attributes.deliveryMode, attributes.appliedComposition], "比較可能なオンライン案内券がないため")
+    : attributes.fixedFeeType.state !== "determined"
+    ? { applicability: "unknown", reason: "固定料金の種類を確定できず、お知らせ空欄を許可するイベントか判定できません" }
+    : simple(receptionCandidates.length > 0, "比較可能な入力済みオンライン案内券がないため"));
   add(plans, eventId, "AREA-002", attributePlan(!allApplied, [attributes.appliedComposition], "全券申込み済みのため"));
 
   for (const ticket of derived.tickets) {
@@ -58,7 +65,13 @@ export function buildRulePlans(derived: DerivedEvent): RulePlan[] {
     add(plans, eventId, "TKT-010", roleUnknown ? { applicability: "unknown", reason: "券名を取得できずプラン変更券か判定できません" } : simple(plan, "プラン変更券ではないため"), id);
     add(plans, eventId, "TKT-011", roleUnknown ? { applicability: "unknown", reason: "券名を取得できずプラン変更券か判定できません" } : simple(plan, "プラン変更券ではないため"), id);
     add(plans, eventId, "TKT-012", roleUnknown ? { applicability: "unknown", reason: "券名を取得できず運営メンバー券か判定できません" } : simple(operation, "運営メンバー券ではないため"), id);
-    add(plans, eventId, "TKT-013", attributePlan(pricingMode === "fixed-fee" && comparison, [attributes.pricingMode], "固定料金比較券ではないため"), id);
+    add(plans, eventId, "TKT-013", !comparison
+      ? simple(false, "固定料金比較券ではないため")
+      : attributes.fixedFeeType.state !== "determined"
+      ? { applicability: "unknown", reason: "固定料金の種類を確定できません" }
+      : fixedFeeType === "nekomachi-plus"
+      ? simple(true, "")
+      : attributePlan(pricingMode === "fixed-fee", [attributes.pricingMode], "固定料金比較券ではないため"), id);
     add(plans, eventId, "TKT-014", simple(false, "途中参加券のオンライン開催ON必須チェックを廃止したため"), id);
     add(plans, eventId, "TKT-016", roleUnknown
       ? { applicability: "unknown", reason: "券名を取得できずプラン変更券か判定できません" }
@@ -66,6 +79,9 @@ export function buildRulePlans(derived: DerivedEvent): RulePlan[] {
     add(plans, eventId, "TKT-017", attributePlan(delivery === "hybrid" && pricingMode === "fixed-fee" && comparison && ticket.name.state === "present" && ticket.name.value.includes("オンライン参加"), [attributes.deliveryMode, attributes.pricingMode], "固定料金ハイブリッドのオンライン参加券ではないため"), id);
     add(plans, eventId, "TKT-018", roleUnknown ? { applicability: "unknown", reason: "券名を取得できず役割候補を確定できません" } : simple(ticket.rawRoleCandidates.length >= 2, "複数の生役割候補を持たないため"), id);
     add(plans, eventId, "TKT-019", roleUnknown ? { applicability: "unknown", reason: "除外役割を確定できず料金比較集合を確定できません" } : simple(comparison, "料金比較集合に含まれないため"), id);
+    add(plans, eventId, "TKT-020", !comparison
+      ? simple(false, "猫町プラス内固定料金の参加券ではないため")
+      : attributePlan(fixedFeeType === "nekomachi-plus", [attributes.fixedFeeType], "猫町プラス内固定料金の参加券ではないため"), id);
   }
 
   add(plans, eventId, "SET-001", normalSetPlan(normalSetUncertain, normalConfiguration && !allApplied, [attributes.pricingMode, attributes.appliedComposition], "standardの通常参加券群がないため"), ids(sets.regularEntrySet));
@@ -108,9 +124,16 @@ export function buildRulePlans(derived: DerivedEvent): RulePlan[] {
   const uncertainRoleTarget = derived.tickets.some((ticket) => ticket.roles.state !== "determined");
   const uncertainOperationTarget = derived.tickets.some((ticket) => hasRole(ticket, "operation-member") && ticket.onlineEnabled.state !== "present");
   const knownEmptyNotice = noticeCandidates.some((ticket) => ticket.organizerNotice.state === "empty");
-  add(plans, eventId, "SET-015", uncertainOperationTarget && !knownEmptyNotice && (delivery === "online" || delivery === "hybrid") && !allApplied
+  const noticeRequiredBase = (delivery === "online" || delivery === "hybrid") && !allApplied && noticeCandidates.length > 0;
+  add(plans, eventId, "SET-015", !noticeRequiredBase
+    ? attributePlan(false, [attributes.deliveryMode, attributes.appliedComposition], "通知比較券がないため")
+    : attributes.fixedFeeType.state !== "determined"
+    ? { applicability: "unknown", reason: "固定料金の種類を確定できず、お知らせ入力が必須か判定できません" }
+    : fixedFeeType === "nekomachi-plus"
+    ? simple(false, "猫町プラス内固定料金はお知らせ空欄を許可するため")
+    : uncertainOperationTarget && !knownEmptyNotice
     ? { applicability: "unknown", reason: "運営メンバー券のオンライン開催設定を取得できず通知対象を確定できません" }
-    : attributePlan((delivery === "online" || delivery === "hybrid") && !allApplied && noticeCandidates.length > 0, [attributes.deliveryMode, attributes.appliedComposition], "通知比較券がないため"), ids(noticeCandidates));
+    : simple(true, ""), ids(noticeCandidates));
   const allUrlTargets = onlineUrlTargets(derived);
   const urlTargets = allUrlTargets.filter((ticket) => guidanceComparisonException(ticket) !== "exclude");
   const uncertainUrlException = allUrlTargets.some((ticket) => guidanceComparisonException(ticket) === "unknown");
@@ -136,6 +159,13 @@ export function notificationTargets(derived: DerivedEvent): DerivedTicket[] {
   return onlineGuidanceCandidates(derived).filter((ticket) =>
     !hasRole(ticket, "operation-member") || (ticket.onlineEnabled.state === "present" && ticket.onlineEnabled.value)
   );
+}
+
+export function receptionNoticeTargets(derived: DerivedEvent): DerivedTicket[] {
+  const candidates = notificationTargets(derived);
+  return derived.attributes?.fixedFeeType.state === "determined" && derived.attributes.fixedFeeType.value === "nekomachi-plus"
+    ? candidates.filter((ticket) => ticket.organizerNotice.state !== "empty")
+    : candidates;
 }
 
 export function onlineGuidanceCandidates(derived: DerivedEvent): DerivedTicket[] {
@@ -223,7 +253,7 @@ function onlineFieldApplicability(base: boolean, ticket: DerivedTicket, requireO
 function noticeApplicability(base: boolean, ticket: DerivedTicket): Pick<RulePlan, "applicability" | "reason"> {
   if (!base) return { applicability: "skipped", reason: "オンライン案内の対象券ではないため" };
   if (ticket.organizerNotice.state === "unavailable" || ticket.organizerNotice.state === "invalid") return { applicability: "unknown", reason: "お知らせ欄を取得できません" };
-  if (ticket.organizerNotice.state === "empty") return { applicability: "skipped", reason: "お知らせが空欄のため、入力有無はSET-015で確認します" };
+  if (ticket.organizerNotice.state === "empty") return { applicability: "skipped", reason: "お知らせが空欄のため、締切時刻を確認しません" };
   return { applicability: "applicable" };
 }
 
@@ -267,13 +297,14 @@ function applicabilityReferences(derived: DerivedEvent, plan: RulePlan): RulePla
     for (const ticket of tickets) {
       references.push(ticketReference(derived.event.eventId, ticket, "name"));
       addEvidence(ticket.roles, ticket.rateKeys);
-      if (["TKT-006", "TKT-012", "TKT-019"].includes(plan.ruleId)) references.push(ticketReference(derived.event.eventId, ticket, "price"));
+      if (["TKT-006", "TKT-012", "TKT-019", "TKT-020"].includes(plan.ruleId)) references.push(ticketReference(derived.event.eventId, ticket, "price"));
       if (["TKT-007", "TKT-011", "TKT-013", "TKT-016"].includes(plan.ruleId)) references.push(ticketReference(derived.event.eventId, ticket, "visibility"));
       if (["TKT-008"].includes(plan.ruleId)) references.push(ticketReference(derived.event.eventId, ticket, "onlineUrl"));
       if (["TKT-009"].includes(plan.ruleId)) references.push(ticketReference(derived.event.eventId, ticket, "organizerNotice"));
       if (["TKT-014", "TKT-017"].includes(plan.ruleId)) references.push(ticketReference(derived.event.eventId, ticket, "onlineEnabled"));
     }
     addEvidence(attributes?.deliveryMode, attributes?.pricingMode, attributes?.pricingScheme);
+    if (["TKT-013", "TKT-020"].includes(plan.ruleId)) addEvidence(attributes?.fixedFeeType);
     if (plan.ruleId !== "TKT-016") addEvidence(attributes?.appliedComposition);
   } else if (plan.ruleId.startsWith("SET-")) {
     references.push(eventReference(derived.event, "tickets"));
@@ -281,6 +312,7 @@ function applicabilityReferences(derived: DerivedEvent, plan: RulePlan): RulePla
       attributes?.deliveryMode, attributes?.pricingMode, attributes?.pricingScheme, attributes?.beginner,
       attributes?.seriesEvent, attributes?.hasAllSessionEntry, attributes?.hasPartialEntry, attributes?.appliedComposition
     );
+    if (plan.ruleId === "SET-015") addEvidence(attributes?.fixedFeeType);
     if (derived.setEvidence) references.push(...evidenceReferences(Object.values(derived.setEvidence).flat()));
   } else if (plan.ruleId === "CROSS-001") {
     for (const ticket of tickets) references.push(
@@ -294,7 +326,7 @@ function applicabilityReferences(derived: DerivedEvent, plan: RulePlan): RulePla
   } else if (plan.ruleId === "AREA-001") {
     references.push(eventReference(derived.event, "bodyText"), eventReference(derived.event, "startAt"));
     for (const ticket of derived.tickets) references.push(ticketReference(derived.event.eventId, ticket, "organizerNotice"));
-    addEvidence(attributes?.deliveryMode, attributes?.appliedComposition);
+    addEvidence(attributes?.deliveryMode, attributes?.fixedFeeType, attributes?.appliedComposition);
   } else if (plan.ruleId === "AREA-002") {
     references.push(eventReference(derived.event, "name"));
     for (const ticket of derived.tickets) references.push(ticketReference(derived.event.eventId, ticket, "name"));

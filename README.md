@@ -106,7 +106,7 @@ artifactディレクトリはPOSIX mode `0700`、ファイルは`0600`を設定�
 変更手順：
 
 1. 業務担当者の確定回答を`docs/外部設計書.md`の業務仕様・回答済み業務確認へ反映する。
-2. `src/domain/catalog.ts`の該当rateKey、金額、販売対象を変更する。
+2. `src/domain/catalog.ts`の該当rateKeyまたは固定料金種別の金額・販売対象を変更する。
 3. catalogの全金額を固定する料金回帰テストを同じ変更で更新する。
 4. `docs/外部設計書.md`、必要なら`docs/内部設計書.md`を更新する。
 5. `npm run lint`、`npm run typecheck`、`npm test`、`npm run build`、Slack dry-runを実行する。

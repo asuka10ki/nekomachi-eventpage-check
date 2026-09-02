@@ -17,6 +17,9 @@ export const OPTIONAL_FIRST_TIME_RATE_KEY: Record<DeliveryMode, RateKey> = {
   hybrid: "OFF-NONMEMBER-FIRST"
 };
 
+export const NEKOMACHI_PLUS_PRICE = 0;
+export const NEKOMACHI_PLUS_REQUIRED_VISIBILITY = ["オン", "オフ", "ハイ"] as const;
+
 const NORMAL_PRICES: Record<RateKey, number[]> = {
   "ON-HYBRID": [0],
   "ON-LOCAL": [800],

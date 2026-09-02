@@ -1,7 +1,7 @@
 import { hasRole, type DerivedEvent, type RulePlan, type ValidationResult } from "../domain/model.js";
 import { extractReceptionStartTimeFromBody, extractReceptionStartTimeFromNotice } from "../utils/date.js";
 import { resolveEventBookTitle, validateTicketNameBookTitle } from "../utils/ticket.js";
-import { notificationTargets } from "../policy/rule-plan.js";
+import { receptionNoticeTargets } from "../policy/rule-plan.js";
 import { nonApplicableResult, result } from "./common.js";
 
 export function validateCrossArea(derived: DerivedEvent, plans: RulePlan[]): ValidationResult[] {
@@ -19,7 +19,7 @@ function validateReception(derived: DerivedEvent, plan: RulePlan): ValidationRes
   const bodyTime = body.state === "present" ? extractReceptionStartTimeFromBody(body.value) : null;
   if (!bodyTime) return result(plan, "オンライン案内", "MULTI_AREA", "CROSS_AREA", "skipped", "本文に受付開始時刻がないため比較しません");
   if (derived.event.startAt.state !== "present") return result(plan, "オンライン案内", "MULTI_AREA", "CROSS_AREA", "unknown", "受付開始時刻を比較できません", { reason: "開催日時を取得できません" });
-  const allTargets = notificationTargets(derived);
+  const allTargets = receptionNoticeTargets(derived);
   const errors: string[] = [];
   for (const ticket of allTargets) {
     if (ticket.organizerNotice.state === "empty") {

@@ -25,6 +25,7 @@ export type ValidationStatus = "passed" | "failed" | "unknown" | "skipped";
 export type EligibilityStatus = "target" | "excluded" | "undetermined";
 export type DeliveryMode = "online" | "offline" | "hybrid";
 export type PricingMode = "standard" | "fixed-fee";
+export type FixedFeeType = "standard" | "nekomachi-plus" | "not-applicable";
 export type PricingScheme = "normal" | "guest" | "not-applicable";
 export type AppliedComposition = "none" | "mixed" | "already-applied-only";
 export type ParticipationForm = "reading" | "after-party" | "none";
@@ -120,6 +121,7 @@ export type DerivedTicket = NormalizedTicket & {
 export type EventAttributes = {
   deliveryMode: DerivationResult<DeliveryMode>;
   pricingMode: DerivationResult<PricingMode>;
+  fixedFeeType: DerivationResult<FixedFeeType>;
   pricingScheme: DerivationResult<PricingScheme>;
   beginner: DerivationResult<boolean>;
   seriesEvent: DerivationResult<boolean>;

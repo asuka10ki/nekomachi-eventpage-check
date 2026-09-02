@@ -128,9 +128,9 @@ function runSummary(events: EventDisplayContext[], counts?: Partial<Pick<RunSumm
 }
 
 describe("new result and classification model", () => {
-  it("keeps all 38 canonical business rule IDs unique", () => {
-    expect(BUSINESS_RULE_IDS).toHaveLength(38);
-    expect(new Set(BUSINESS_RULE_IDS).size).toBe(38);
+  it("keeps all 39 canonical business rule IDs unique", () => {
+    expect(BUSINESS_RULE_IDS).toHaveLength(39);
+    expect(new Set(BUSINESS_RULE_IDS).size).toBe(39);
   });
   it("distinguishes empty from unavailable", () => {
     const normalized = normalizeEvent(event({ bodyText: undefined }));
@@ -424,6 +424,106 @@ describe("fixed fee and its documented detection limits", () => {
     tickets[0] = { ...tickets[0], visibilityTags: ["オン"] };
     expect(validateEvent(event({ tickets })).validationResults.find((item) => item.ruleId === "TKT-013" && item.status === "failed")?.message)
       .toContain("固定料金チケットの販売対象に「オフ」、「ハイ」、「外」を追加してください");
+  });
+
+  describe("nekomachi-plus fixed fee", () => {
+    function plusTickets(overrides: Partial<TicketInfo> = {}): TicketInfo[] {
+      return [
+        ticket({
+          name: "猫町プラス内参加",
+          price: 0,
+          visibilityTags: ["オン", "オフ", "ハイ"],
+          organizerNotice: null,
+          ...overrides
+        }),
+        ticket({
+          name: planName,
+          price: 0,
+          visibilityTags: ["A", "U-22", "B"],
+          onlineEnabled: false,
+          onlineUrl: null,
+          organizerNotice: null
+        })
+      ];
+    }
+
+    it("classifies exactly two tickets with one plan-change ticket and no external visibility", () => {
+      const outcome = validateEvent(event({ tickets: plusTickets() }));
+
+      expect(outcome.derived.attributes?.pricingMode).toMatchObject({ state: "determined", value: "fixed-fee" });
+      expect(outcome.derived.attributes?.fixedFeeType).toMatchObject({ state: "determined", value: "nekomachi-plus" });
+      expect(outcome.validationResults.find((item) => item.ruleId === "SET-011")?.status).toBe("passed");
+      expect(outcome.validationResults.find((item) => item.ruleId === "TKT-013" && item.ticketIds?.includes("ticket-1"))?.status).toBe("passed");
+      expect(outcome.validationResults.find((item) => item.ruleId === "TKT-020" && item.ticketIds?.includes("ticket-1"))?.status).toBe("passed");
+      expect(outcome.validationResults.find((item) => item.ruleId === "SET-015")?.status).toBe("skipped");
+      expect(outcome.validationResults.find((item) => item.ruleId === "AREA-001")?.status).toBe("skipped");
+      expect(outcome.validationResults.find((item) => item.ruleId === "TKT-008" && item.ticketIds?.includes("ticket-1"))?.status).toBe("passed");
+    });
+
+    it("requires every nekomachi-plus participation ticket to be free", () => {
+      const outcome = validateEvent(event({ tickets: plusTickets({ price: 500 }) }));
+
+      expect(outcome.derived.attributes?.fixedFeeType).toMatchObject({ state: "determined", value: "nekomachi-plus" });
+      expect(outcome.validationResults.find((item) => item.ruleId === "TKT-020" && item.status === "failed")?.message)
+        .toContain("猫町プラス内イベントの参加券は無料にしてください");
+    });
+
+    it("distinguishes an empty nekomachi-plus price from an unavailable price", () => {
+      const empty = validateEvent(event({ tickets: plusTickets({ price: null }) }));
+      expect(empty.validationResults.find((item) => item.ruleId === "TKT-020")?.status).toBe("failed");
+
+      const unavailable = validateEvent(event({ tickets: plusTickets({ price: null, fieldAvailability: { price: false } }) }));
+      expect(unavailable.validationResults.find((item) => item.ruleId === "TKT-020")?.status).toBe("unknown");
+    });
+
+    it("requires online, local and hybrid visibility without requiring external visibility", () => {
+      const outcome = validateEvent(event({ tickets: plusTickets({ visibilityTags: ["オン", "オフ"] }) }));
+
+      expect(outcome.validationResults.find((item) => item.ruleId === "TKT-013" && item.status === "failed")?.message)
+        .toContain("猫町プラス内チケットの販売対象に「ハイ」を追加してください");
+    });
+
+    it.each([
+      ["one ticket", [ticket({ name: "参加", price: 0, visibilityTags: ["オン", "オフ", "ハイ"] })]],
+      ["two tickets without a plan-change ticket", [
+        ticket({ name: "参加A", price: 0, visibilityTags: ["オン", "オフ", "ハイ"] }),
+        ticket({ name: "参加B", price: 0, visibilityTags: ["オン", "オフ", "ハイ"] })
+      ]],
+      ["an external target", [
+        ticket({ name: "参加", price: 0, visibilityTags: ["オン", "オフ", "ハイ", "外"] }),
+        ticket({ name: planName, price: 0, visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null })
+      ]]
+    ])("keeps %s as a standard fixed-fee event", (_label, tickets) => {
+      const attributes = deriveEvent(normalizeEvent(event({ tickets }))).attributes;
+      expect(attributes?.pricingMode).toMatchObject({ state: "determined", value: "fixed-fee" });
+      expect(attributes?.fixedFeeType).toMatchObject({ state: "determined", value: "standard" });
+    });
+
+    it("does not guess the fixed-fee type when visibility cannot be acquired", () => {
+      const tickets = plusTickets({ fieldAvailability: { visibility: false } });
+      const outcome = validateEvent(event({ tickets }));
+      expect(outcome.derived.attributes?.fixedFeeType).toMatchObject({ state: "unknown" });
+      for (const ruleId of ["TKT-013", "TKT-020"]) {
+        expect(outcome.validationResults.find((item) => item.ruleId === ruleId && item.ticketIds?.includes("ticket-1"))?.status).toBe("unknown");
+        expect(outcome.validationResults.find((item) => item.ruleId === ruleId && item.ticketIds?.includes("ticket-2"))?.status).toBe("skipped");
+      }
+    });
+
+    it("does not classify a plan-change plus all-session composition as fixed fee", () => {
+      const tickets = plusTickets({ name: "全3回参加" });
+      const attributes = deriveEvent(normalizeEvent(event({ tickets }))).attributes;
+      expect(attributes?.pricingMode).toMatchObject({ state: "determined", value: "standard" });
+      expect(attributes?.fixedFeeType).toMatchObject({ state: "determined", value: "not-applicable" });
+    });
+
+    it("still validates an entered notice while allowing an empty notice", () => {
+      const blank = validateEvent(event({ tickets: plusTickets() }));
+      expect(blank.validationResults.find((item) => item.ruleId === "TKT-009" && item.ticketIds?.includes("ticket-1"))?.status).toBe("skipped");
+
+      const entered = validateEvent(event({ tickets: plusTickets({ organizerNotice: "20:00から受付を開始します。20:20までに受付を済ませてください。" }) }));
+      expect(entered.validationResults.find((item) => item.ruleId === "TKT-009" && item.ticketIds?.includes("ticket-1"))?.status).toBe("failed");
+      expect(entered.validationResults.find((item) => item.ruleId === "AREA-001")?.status).toBe("passed");
+    });
   });
 
   it.each([

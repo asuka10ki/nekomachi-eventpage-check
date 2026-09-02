@@ -14,6 +14,7 @@ import {
   type DerivationResult,
   type EligibilityDecision,
   type EventAttributes,
+  type FixedFeeType,
   type NormalizedEvent,
   type NormalizedTicket,
   type ParticipationForm,
@@ -30,6 +31,7 @@ export const BUSINESS_RULE_IDS = [
   "EVT-001", "BODY-001", "BODY-002", "BODY-003", "BODY-004", "AREA-001", "AREA-002",
   "TKT-003", "TKT-004", "TKT-005", "TKT-006", "TKT-007", "TKT-008", "TKT-009",
   "TKT-010", "TKT-011", "TKT-012", "TKT-013", "TKT-014", "TKT-016", "TKT-017", "TKT-018", "TKT-019",
+  "TKT-020",
   "SET-001", "SET-002", "SET-003", "SET-004", "SET-005", "SET-006", "SET-007", "SET-010",
   "SET-011", "SET-012", "SET-013", "SET-014", "SET-015", "CROSS-001", "CROSS-002"
 ] as const;
@@ -60,10 +62,12 @@ export function deriveEvent(event: NormalizedEvent): DerivedEvent {
   const pricingMode = derivePricingMode(event, firstPassTickets, pricingComparisonSet);
   const tickets = firstPassTickets.map((ticket) => finishTicketRoles(ticket, deliveryMode, pricingMode, pricingComparisonSet));
   const sets = buildTicketSets(tickets, pricingComparisonSet.map((ticket) => ticket.ticketId));
+  const fixedFeeType = deriveFixedFeeType(event, tickets, pricingMode, sets.pricingComparisonSet);
   const pricingScheme = derivePricingScheme(deliveryMode, pricingMode, sets);
   const attributes: EventAttributes = {
     deliveryMode,
     pricingMode,
+    fixedFeeType,
     pricingScheme,
     beginner: deriveBeginner(event, tickets),
     seriesEvent: event.name.state === "present"
@@ -237,6 +241,35 @@ function derivePricingMode(event: NormalizedEvent, tickets: DerivedTicket[], com
     ...collectionEvidence,
     ...comparisonSet.map((ticket) => evidence(ticketReference(event.eventId, ticket, "price"), "比較対象券の金額が全件同額か確認", "normalized-value"))
   ]);
+}
+
+function deriveFixedFeeType(
+  event: NormalizedEvent,
+  tickets: DerivedTicket[],
+  pricingMode: DerivationResult<PricingMode>,
+  comparisonSet: DerivedTicket[]
+): DerivationResult<FixedFeeType> {
+  const ticketCountEvidence = evidence(eventReference(event, "tickets"), "猫町プラス内固定料金の全2券構成を確認", "normalized-value", "2");
+  if (event.tickets.state !== "present") return unknown("チケット集合を取得できません", [...pricingMode.evidence, ticketCountEvidence]);
+  if (pricingMode.state === "determined" && pricingMode.value !== "fixed-fee") return determined("not-applicable", [...pricingMode.evidence, ticketCountEvidence]);
+  if (pricingMode.state !== "determined" && comparisonSet.length !== 1) return unknown("料金方式を確定できません", [...pricingMode.evidence, ticketCountEvidence]);
+  const roleEvidenceItems = tickets.flatMap((ticket) => ticket.roles.evidence);
+  const visibilityEvidence = tickets.map((ticket) => evidence(ticketReference(event.eventId, ticket, "visibility"), "全チケットの販売対象に「外」がないことを確認", "normalized-value", "外なし"));
+  if (tickets.length === 2) {
+    if (tickets.some((ticket) => ticket.roles.state !== "determined")) {
+      return unknown("片方がプラン変更券か判定できません", [...pricingMode.evidence, ticketCountEvidence, ...roleEvidenceItems]);
+    }
+    const planChangeCount = tickets.filter((ticket) => hasRole(ticket, "plan-change")).length;
+    if (planChangeCount === 1) {
+      if (tickets.some((ticket) => ticket.visibility.state === "unavailable" || ticket.visibility.state === "invalid")) {
+        return unknown("販売対象「外」の有無を確認できません", [...pricingMode.evidence, ticketCountEvidence, ...roleEvidenceItems, ...visibilityEvidence]);
+      }
+      const hasExternal = tickets.some((ticket) => ticket.visibility.state === "present" && ticket.visibility.value.includes("外"));
+      if (!hasExternal) return determined("nekomachi-plus", [...pricingMode.evidence, ticketCountEvidence, ...roleEvidenceItems, ...visibilityEvidence]);
+    }
+  }
+  if (pricingMode.state !== "determined") return unknown("料金方式を確定できません", [...pricingMode.evidence, ticketCountEvidence, ...roleEvidenceItems, ...visibilityEvidence]);
+  return determined("standard", [...pricingMode.evidence, ticketCountEvidence, ...roleEvidenceItems, ...visibilityEvidence]);
 }
 
 function derivePricingScheme(

@@ -87,9 +87,11 @@ describe("TSK-010 traceability", () => {
       tickets: [ticket({ name: "固定料金オンライン参加", price: 2000, visibilityTags: ["オン", "オフ", "ハイ", "外"] })]
     }));
     expect(fixed.derived.attributes?.pricingMode).toMatchObject({ state: "determined", value: "fixed-fee" });
+    expect(fixed.derived.attributes?.fixedFeeType).toMatchObject({ state: "determined", value: "standard" });
     for (const outcome of [online, offline, hybrid, fixed]) {
       expect(outcome.derived.attributes?.deliveryMode.evidence.length).toBeGreaterThan(0);
       expect(outcome.derived.attributes?.pricingMode.evidence.length).toBeGreaterThan(0);
+      expect(outcome.derived.attributes?.fixedFeeType.evidence.length).toBeGreaterThan(0);
     }
   });
 

@@ -31,7 +31,7 @@ function inspectedFieldsForRule(derived: DerivedEvent, result: ValidationResult)
   if (result.ruleId === "EVT-001") refs.push(eventReference(derived.event, "startAt"), eventReference(derived.event, "applicationDeadline"));
   else if (result.ruleId.startsWith("BODY-")) refs.push(eventReference(derived.event, "bodyText"));
   else if (["TKT-003", "TKT-004", "TKT-005", "TKT-010", "TKT-018"].includes(result.ruleId)) addTicket("name");
-  else if (["TKT-006", "TKT-012", "TKT-019"].includes(result.ruleId)) addTicket("price");
+  else if (["TKT-006", "TKT-012", "TKT-019", "TKT-020"].includes(result.ruleId)) addTicket("price");
   else if (["TKT-007", "TKT-011", "TKT-013", "TKT-016"].includes(result.ruleId)) addTicket("visibility");
   else if (result.ruleId === "TKT-008") addTicket("onlineUrl");
   else if (result.ruleId === "TKT-009") {

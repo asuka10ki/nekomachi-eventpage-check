@@ -1,4 +1,4 @@
-import { allowedPrices } from "../domain/catalog.js";
+import { allowedPrices, NEKOMACHI_PLUS_PRICE, NEKOMACHI_PLUS_REQUIRED_VISIBILITY } from "../domain/catalog.js";
 import type { DerivedEvent, DerivedTicket, RulePlan, ValidationResult } from "../domain/model.js";
 import { extractDeadlineTimeFromNotice, formatHourMinute, isDeadlineFiveMinutesBeforeStart } from "../utils/date.js";
 import { normalizeCommonText } from "../utils/normalize.js";
@@ -56,7 +56,9 @@ function validateTicketPlan(derived: DerivedEvent, plan: RulePlan): ValidationRe
       return booleanResult(plan, metadata.group, ticket.price.state === "present" && ticket.price.value === 0, `${label}: 「運営メンバー」チケットは無料にしてください`);
     }
     case "TKT-013":
-      return validateRequiredTags(plan, ticket, label, ["オン", "オフ", "ハイ", "外"], "固定料金チケットの販売対象");
+      return derived.attributes?.fixedFeeType.state === "determined" && derived.attributes.fixedFeeType.value === "nekomachi-plus"
+        ? validateRequiredTags(plan, ticket, label, [...NEKOMACHI_PLUS_REQUIRED_VISIBILITY], "猫町プラス内チケットの販売対象")
+        : validateRequiredTags(plan, ticket, label, ["オン", "オフ", "ハイ", "外"], "固定料金チケットの販売対象");
     case "TKT-014": {
       if (ticket.onlineEnabled.state !== "present") return unknownTicket(plan, metadata.group, label, "オンライン開催設定を取得できません");
       return booleanResult(plan, metadata.group, ticket.onlineEnabled.value, `${label}: 途中参加チケットの「オンライン開催する」をONにしてください`);
@@ -83,6 +85,10 @@ function validateTicketPlan(derived: DerivedEvent, plan: RulePlan): ValidationRe
       if (ticket.price.state === "unavailable") return unknownTicket(plan, metadata.group, label, "金額欄を取得できません");
       const ok = ticket.price.state === "present" && Number.isInteger(ticket.price.value) && ticket.price.value >= 0;
       return booleanResult(plan, metadata.group, ok, `${label}: 金額を0以上の整数で入力してください`);
+    }
+    case "TKT-020": {
+      if (ticket.price.state === "unavailable") return unknownTicket(plan, metadata.group, label, "金額欄を取得できません");
+      return booleanResult(plan, metadata.group, ticket.price.state === "present" && ticket.price.value === NEKOMACHI_PLUS_PRICE, `${label}: 猫町プラス内イベントの参加券は無料にしてください`);
     }
     default:
       return result(plan, metadata.group, "TICKET", "EACH_TICKET", "unknown", "未実装のチケットルールです");
@@ -134,7 +140,7 @@ function ticketForPlan(derived: DerivedEvent, plan: RulePlan): DerivedTicket | u
 
 function ticketRuleMetadata(ruleId: string): { group: string } {
   if (["TKT-003", "TKT-004"].includes(ruleId)) return { group: "回数表記" };
-  if (["TKT-006", "TKT-012", "TKT-019"].includes(ruleId)) return { group: "料金" };
+  if (["TKT-006", "TKT-012", "TKT-019", "TKT-020"].includes(ruleId)) return { group: "料金" };
   if (["TKT-007", "TKT-011", "TKT-013", "TKT-016"].includes(ruleId)) return { group: "販売対象" };
   if (["TKT-008", "TKT-009", "TKT-014"].includes(ruleId)) return { group: "オンライン案内" };
   if (["TKT-010"].includes(ruleId)) return { group: "プラン変更" };
