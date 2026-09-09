@@ -843,7 +843,7 @@ describe("event checks", () => {
     expect(errors.some((error) => error.includes("期待ルールに一致しないチケット名") && error.includes("運営メンバー"))).toBe(false);
     expect(errors.some((error) => error.includes("運営メンバー") && error.includes("オンライン参加URLが空"))).toBe(true);
     expect(errors.some((error) => error.includes("主催者からのお知らせが空欄"))).toBe(true);
-    expect(errors.some((error) => error.includes("運営メンバー") && error.includes("締切時刻が開始5分前ではありません"))).toBe(true);
+    expect(errors.some((error) => error.includes("運営メンバー") && error.includes("締切時刻が開始5分前ではありません"))).toBe(false);
   });
 
   it("requires fixed-fee two-ticket events to include a plan-change ticket", () => {

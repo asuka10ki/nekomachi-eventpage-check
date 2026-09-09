@@ -25,10 +25,11 @@ export type ValidationStatus = "passed" | "failed" | "unknown" | "skipped";
 export type EligibilityStatus = "target" | "excluded" | "undetermined";
 export type DeliveryMode = "online" | "offline" | "hybrid";
 export type PricingMode = "standard" | "fixed-fee";
-export type FixedFeeType = "standard" | "nekomachi-plus" | "not-applicable";
+export type FixedFeeType = "standard" | "nekomachi-plus" | "member-nonmember" | "not-applicable";
 export type PricingScheme = "normal" | "guest" | "not-applicable";
 export type AppliedComposition = "none" | "mixed" | "already-applied-only";
 export type ParticipationForm = "reading" | "after-party" | "none";
+export type AllSessionVariant = "standard" | "reading-set" | "without-reading";
 
 export type RateKey =
   | "ON-HYBRID"
@@ -116,6 +117,7 @@ export type DerivedTicket = NormalizedTicket & {
   rateKeys: DerivationResult<RateKey[]>;
   participationForm: DerivationResult<ParticipationForm>;
   firstTime: DerivationResult<boolean>;
+  allSessionVariant: DerivationResult<AllSessionVariant>;
 };
 
 export type EventAttributes = {

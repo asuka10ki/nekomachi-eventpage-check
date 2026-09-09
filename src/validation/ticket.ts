@@ -1,6 +1,6 @@
-import { allowedPrices, NEKOMACHI_PLUS_PRICE, NEKOMACHI_PLUS_REQUIRED_VISIBILITY } from "../domain/catalog.js";
+import { allowedPrices, memberNonmemberAudience, memberNonmemberFixedPrice, NEKOMACHI_PLUS_PRICE, NEKOMACHI_PLUS_REQUIRED_VISIBILITY } from "../domain/catalog.js";
 import type { DerivedEvent, DerivedTicket, RulePlan, ValidationResult } from "../domain/model.js";
-import { extractDeadlineTimeFromNotice, formatHourMinute, isDeadlineFiveMinutesBeforeStart } from "../utils/date.js";
+import { extractDeadlineTimeFromNotice, formatHourMinute } from "../utils/date.js";
 import { normalizeCommonText } from "../utils/normalize.js";
 import { nonApplicableResult, result } from "./common.js";
 
@@ -38,11 +38,13 @@ function validateTicketPlan(derived: DerivedEvent, plan: RulePlan): ValidationRe
     }
     case "TKT-009": {
       if (ticket.organizerNotice.state === "empty") return result(plan, metadata.group, "TICKET", "EACH_TICKET", "skipped", "お知らせが空欄のため、締切時刻は確認しません");
-      if (ticket.organizerNotice.state !== "present" || derived.event.startAt.state !== "present") return unknownTicket(plan, metadata.group, label, "お知らせまたは開始日時を取得できません");
+      if (ticket.organizerNotice.state !== "present") return unknownTicket(plan, metadata.group, label, "お知らせを取得できません");
       const actual = extractDeadlineTimeFromNotice(ticket.organizerNotice.value);
-      const ok = isDeadlineFiveMinutesBeforeStart(derived.event.startAt.value, ticket.organizerNotice.value);
+      if (actual === null) return result(plan, metadata.group, "TICKET", "EACH_TICKET", "passed", `${label}: お知らせに締切時刻の記載がないため確認不要です`);
+      if (derived.event.startAt.state !== "present") return unknownTicket(plan, metadata.group, label, "開始日時を取得できません");
       const expected = formatHourMinute(new Date(derived.event.startAt.value.getTime() - 5 * 60 * 1000));
-      return result(plan, metadata.group, "TICKET", "EACH_TICKET", ok ? "passed" : "failed", ok ? `${label}: お知らせの締切時刻は正常です` : `${label}: 主催者からのお知らせの締切時刻が開始5分前ではありません。期待: ${expected} / 実際: ${actual ?? "見つかりません"}`);
+      const ok = actual === expected;
+      return result(plan, metadata.group, "TICKET", "EACH_TICKET", ok ? "passed" : "failed", ok ? `${label}: お知らせの締切時刻は正常です` : `${label}: 主催者からのお知らせの締切時刻が開始5分前ではありません。期待: ${expected} / 実際: ${actual}`);
     }
     case "TKT-010": {
       if (ticket.name.state !== "present") return unknownTicket(plan, metadata.group, label, "券名を取得できません");
@@ -99,6 +101,15 @@ function validatePrice(plan: RulePlan, derived: DerivedEvent, ticket: DerivedTic
   if (ticket.price.state === "unavailable") return unknownTicket(plan, "料金", label, "金額欄を取得できません");
   if (ticket.price.state === "empty" || ticket.price.state === "invalid") {
     return result(plan, "料金", "TICKET", "EACH_TICKET", "failed", `${label}: 金額が許可金額と異なります。実際: ${ticket.price.state === "empty" ? "空欄" : ticket.price.rawValue}`, { actual: ticket.price.state === "empty" ? null : ticket.price.rawValue });
+  }
+  if (derived.attributes?.fixedFeeType.state === "determined" && derived.attributes.fixedFeeType.value === "member-nonmember") {
+    if (ticket.visibility.state === "unavailable" || ticket.visibility.state === "invalid") return unknownTicket(plan, "料金", label, "販売対象を取得できません");
+    const visibility = ticket.visibility.state === "present" ? ticket.visibility.value : [];
+    const audience = memberNonmemberAudience(visibility);
+    const expected = memberNonmemberFixedPrice(audience);
+    if (expected === null) return result(plan, "料金", "TICKET", "EACH_TICKET", "failed", `${label}: 会員・非会員別固定料金の販売対象を、会員向け（オン・オフ・ハイ）または「外」のどちらかにしてください`, { actual: visibility });
+    const ok = ticket.price.value === expected;
+    return result(plan, "料金", "TICKET", "EACH_TICKET", ok ? "passed" : "failed", ok ? `${label}: 金額は正常です` : `${label}: 金額が許可金額と異なります。期待: ${expected}円 / 実際: ${ticket.price.value}円`, { expected, actual: ticket.price.value });
   }
   if (ticket.rateKeys.state !== "determined" || derived.attributes?.pricingScheme.state !== "determined") {
     return unknownTicket(plan, "料金", label, "金額、rateKey、料金体系のいずれかを確定できません");

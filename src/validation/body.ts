@@ -38,18 +38,16 @@ export function parseBodyFeeMap(text: string, mode: DeliveryMode): Map<RateKey, 
   for (const row of text.split(/\n|。/).map((value) => value.trim()).filter(Boolean)) {
     // 通常料金表と並記されるスクール・セット参加申込み済みの個別料金は別券群で検査する。
     if (/猫町スクール|お申し込み(?:済|いただ)/.test(row)) continue;
-    const amountMatch = row.match(/無料|([0-9０-９,，]+)\s*円/);
-    if (!amountMatch) continue;
-    const amount = amountMatch[0].includes("無料") ? 0 : Number((amountMatch[1] ?? "").replace(/[，,]/g, "").replace(/[０-９]/g, (char) => String("０１２３４５６７８９".indexOf(char))));
+    const amount = parseFeeAmount(row);
+    if (amount === undefined) continue;
     const first = row.includes("今月1回目");
     const second = row.includes("今月2回目以降");
     const firstTime = row.includes("初参加");
+    const onlineRecurrenceAmounts = mode === "online" ? extractOnlineRecurrenceAmounts(row) : [];
     let keys: RateKey[] = [];
     if (mode === "online") {
       if (row.includes("ハイブリッド会員")) keys.push("ON-HYBRID");
       if (row.includes("地域会員")) keys.push("ON-LOCAL");
-      if (row.includes("オンライン会員") && first) keys.push("ON-ONLINE-1");
-      if (row.includes("オンライン会員") && second) keys.push("ON-ONLINE-2");
       if (row.includes("非会員")) keys.push(firstTime ? "ON-NONMEMBER-FIRST" : "ON-NONMEMBER");
     } else {
       if (row.includes("地域会員") && first) keys.push("OFF-LOCAL-1");
@@ -59,15 +57,48 @@ export function parseBodyFeeMap(text: string, mode: DeliveryMode): Map<RateKey, 
       if (row.includes("オンライン会員")) keys.push("OFF-ONLINE");
       if (row.includes("非会員")) keys.push(firstTime ? "OFF-NONMEMBER-FIRST" : "OFF-NONMEMBER");
     }
-    if (keys.length === 0 && (first || second)) {
+    if (keys.length === 0 && onlineRecurrenceAmounts.length === 0 && (first || second)) {
       keys = inheritRecurrenceKeys(previousSemanticKeys, mode, first ? 1 : 2);
     }
-    for (const key of keys) map.set(key, [...(map.get(key) ?? []), amount]);
+    for (const key of keys) appendAmount(map, key, amount);
+    for (const [key, recurrenceAmount] of onlineRecurrenceAmounts) appendAmount(map, key, recurrenceAmount);
     // 対象者が明示された料金行だけを次行の継承元にする。見出し、注記、
     // 継承行を重ねて推測することはしない。
-    previousSemanticKeys = hasExplicitFeeAudience(row) ? keys : [];
+    previousSemanticKeys = hasExplicitFeeAudience(row)
+      ? [...new Set([...keys, ...onlineRecurrenceAmounts.map(([key]) => key)])]
+      : [];
   }
   return map;
+}
+
+function extractOnlineRecurrenceAmounts(row: string): Array<[RateKey, number]> {
+  if (!row.includes("オンライン会員")) return [];
+  const markers = [...row.matchAll(/今月(1回目|2回目以降)/g)];
+  const entries: Array<[RateKey, number]> = [];
+  markers.forEach((marker, index) => {
+    const start = (marker.index ?? 0) + marker[0].length;
+    const end = markers[index + 1]?.index ?? row.length;
+    const amount = parseFeeAmount(row.slice(start, end));
+    if (amount !== undefined) entries.push([marker[1] === "1回目" ? "ON-ONLINE-1" : "ON-ONLINE-2", amount]);
+  });
+  if (entries.length === 0 && markers.length === 1) {
+    const amount = parseFeeAmount(row);
+    if (amount !== undefined) entries.push([markers[0][1] === "1回目" ? "ON-ONLINE-1" : "ON-ONLINE-2", amount]);
+  }
+  return entries;
+}
+
+function parseFeeAmount(text: string): number | undefined {
+  const match = text.match(/無料|([0-9０-９,，]+)\s*円/);
+  if (!match) return undefined;
+  if (match[0].includes("無料")) return 0;
+  return Number((match[1] ?? "")
+    .replace(/[，,]/g, "")
+    .replace(/[０-９]/g, (char) => String("０１２３４５６７８９".indexOf(char))));
+}
+
+function appendAmount(map: Map<RateKey, number[]>, key: RateKey, amount: number): void {
+  map.set(key, [...(map.get(key) ?? []), amount]);
 }
 
 function inheritRecurrenceKeys(previous: RateKey[], mode: DeliveryMode, recurrence: 1 | 2): RateKey[] {

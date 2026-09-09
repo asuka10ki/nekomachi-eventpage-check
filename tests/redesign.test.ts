@@ -282,6 +282,32 @@ describe("normal ticket composition", () => {
     ].join("\n");
     expect(firstStatus(event({ tickets: onlineTickets(), bodyText: body }), "BODY-003")).toBe("passed");
   });
+
+  it("associates two recurrence prices written on one online-member line", () => {
+    const body = [
+      "■参加費",
+      "ハイブリッド会員：無料",
+      "地域会員：800円",
+      "オンライン会員：今月1回目無料、今月2回目以降800円",
+      "非会員：1,100円"
+    ].join("\n");
+
+    expect(parseBodyFeeMap(body, "online").get("ON-ONLINE-1")).toEqual([0]);
+    expect(parseBodyFeeMap(body, "online").get("ON-ONLINE-2")).toEqual([800]);
+    expect(firstStatus(event({ tickets: onlineTickets(), bodyText: body }), "BODY-003")).toBe("passed");
+  });
+
+  it("keeps recurrence prices separate with full-width and comma-separated amounts", () => {
+    const amounts = parseBodyFeeMap("オンライン会員：今月1回目無料、今月2回目以降１，２００円", "online");
+    expect(amounts.get("ON-ONLINE-1")).toEqual([0]);
+    expect(amounts.get("ON-ONLINE-2")).toEqual([1200]);
+  });
+
+  it("does not reuse a later amount for an earlier recurrence with no amount", () => {
+    const amounts = parseBodyFeeMap("オンライン会員：今月1回目、今月2回目以降800円", "online");
+    expect(amounts.has("ON-ONLINE-1")).toBe(false);
+    expect(amounts.get("ON-ONLINE-2")).toEqual([800]);
+  });
 });
 
 describe("offline SET-001 through SET-005 responsibility", () => {
@@ -355,6 +381,35 @@ describe("offline SET-001 through SET-005 responsibility", () => {
     const outcome = validateEvent(event({ name: "【愛知】読書会", bodyText: offlineBody, tickets }));
     expect(outcome.validationResults.find((item) => item.ruleId === "SET-001")?.status).toBe("failed");
     expect(outcome.validationResults.find((item) => item.ruleId === "SET-004")?.status).toBe("failed");
+  });
+
+  it("identifies the ticket number to rename when SET-004 cannot recognize its participation form", () => {
+    const tickets = offlineTickets();
+    const nonmemberReading = tickets.findIndex((entry) => entry.name === "非会員 読書会のみ参加");
+    tickets[nonmemberReading] = { ...tickets[nonmemberReading], name: "読書会のみ" };
+
+    const outcome = validateEvent(event({ name: "【愛知】読書会", bodyText: offlineBody, tickets }));
+    const validation = outcome.validationResults.find((item) => item.ruleId === "SET-004");
+    expect(validation).toMatchObject({
+      status: "failed",
+      message: "非会員向けの「読書会のみ参加」券がありません。修正対象: 11番目「読書会のみ」（券名を「読書会のみ参加」に変更してください）"
+    });
+    expect(validation?.ticketIds).toBeUndefined();
+
+    const slack = buildSlackMessages(runSummary([outcome.event])).join("\n");
+    expect(slack).toContain("[SET-004] 非会員向けの「読書会のみ参加」券がありません。修正対象: 11番目「読書会のみ」（券名を「読書会のみ参加」に変更してください）");
+    expect(slack).not.toContain("[SET-004 / 1番目");
+  });
+
+  it("tells the operator to add a ticket when SET-004 has no existing rename candidate", () => {
+    const tickets = offlineTickets().filter((entry) => !entry.name.startsWith("非会員 読書会のみ参加"));
+    const validation = validateEvent(event({ name: "【愛知】読書会", bodyText: offlineBody, tickets }))
+      .validationResults.find((item) => item.ruleId === "SET-004");
+
+    expect(validation).toMatchObject({
+      status: "failed",
+      message: "非会員向けの「読書会のみ参加」券がありません。販売対象「外」の「読書会のみ参加」券を追加してください"
+    });
   });
 });
 
@@ -535,8 +590,98 @@ describe("fixed fee and its documented detection limits", () => {
   });
 });
 
+describe("member/nonmember fixed fee", () => {
+  function memberNonmemberFixedTickets(): TicketInfo[] {
+    return [
+      ticket({ name: "代表作3冊", price: 8500, visibilityTags: ["外"] }),
+      ticket({ name: "初参加 代表作3冊", price: 8500, visibilityTags: ["外"] }),
+      ticket({ name: "代表作3冊", price: 6000, visibilityTags: ["オン", "ハイ"] }),
+      ticket({ name: "代表作3冊", price: 6000, visibilityTags: ["オフ"] }),
+      ticket({ name: planName, price: 0, visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null })
+    ];
+  }
+
+  it("classifies the 6000-yen member and 8500-yen external table as fixed fee", () => {
+    const outcome = validateEvent(event({
+      name: "【オンライン・全3回】哲学者と読む代表作3冊",
+      tickets: memberNonmemberFixedTickets()
+    }));
+
+    expect(outcome.derived.attributes?.pricingMode).toMatchObject({ state: "determined", value: "fixed-fee" });
+    expect(outcome.derived.attributes?.fixedFeeType).toMatchObject({ state: "determined", value: "member-nonmember" });
+    expect(outcome.validationResults.filter((item) => item.ruleId === "TKT-006" && item.status === "passed")).toHaveLength(4);
+    expect(outcome.validationResults.filter((item) => item.ruleId === "TKT-013" && item.status === "skipped")).toHaveLength(5);
+    expect(outcome.validationResults.find((item) => item.ruleId === "BODY-003")?.status).toBe("skipped");
+    for (const ruleId of ["SET-001", "SET-002", "SET-003", "SET-004", "SET-005"]) {
+      expect(outcome.validationResults.find((item) => item.ruleId === ruleId)?.status).toBe("skipped");
+    }
+  });
+
+  it.each([
+    ["member tickets only", [
+      ticket({ name: "会員1", price: 6000, visibilityTags: ["オン", "ハイ"] }),
+      ticket({ name: "会員2", price: 6000, visibilityTags: ["オフ"] })
+    ]],
+    ["external tickets only", [
+      ticket({ name: "非会員", price: 8500, visibilityTags: ["外"] }),
+      ticket({ name: "初参加 非会員", price: 8500, visibilityTags: ["外"] })
+    ]]
+  ])("does not require both price bands: %s", (_label, comparisonTickets) => {
+    const outcome = validateEvent(event({ tickets: [
+      ...comparisonTickets,
+      ticket({ name: planName, price: 0, visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null })
+    ] }));
+
+    expect(outcome.derived.attributes?.fixedFeeType).toMatchObject({ state: "determined", value: "member-nonmember" });
+    expect(outcome.validationResults.find((item) => item.ruleId === "TKT-006" && item.ticketIds?.includes("ticket-1"))?.status).toBe("passed");
+  });
+
+  it("reports the expected amount through TKT-006 when a row uses the other row's amount", () => {
+    const tickets = memberNonmemberFixedTickets();
+    tickets[0] = { ...tickets[0], price: 6000 };
+    const outcome = validateEvent(event({ tickets }));
+    const validation = outcome.validationResults.find((item) => item.ruleId === "TKT-006" && item.ticketIds?.includes("ticket-1"));
+
+    expect(outcome.derived.attributes?.fixedFeeType).toMatchObject({ state: "determined", value: "member-nonmember" });
+    expect(validation).toMatchObject({ status: "failed" });
+    expect(validation?.message).toContain("期待: 8500円 / 実際: 6000円");
+  });
+});
+
 describe("series, applied, beginner and unknown roles", () => {
   const seriesTickets = (label: string) => ["オン", "オフ", "ハイ", "外"].map((tag) => ticket({ name: `${label} ${tag}`, price: 999, visibilityTags: [tag] }));
+
+  it("checks all-session sales targets separately for reading-set and without-reading applications", () => {
+    const info = event({ tickets: [
+      ticket({ name: "猫町スクール第Ⅱ期全6回に「読書会なし」でお申し込み済みの方", price: 500, visibilityTags: ["オン", "オフ", "ハイ"] }),
+      ticket({ name: "猫町スクール第Ⅱ期全6回に「読書会セット」でお申し込み済みの方", price: 0, visibilityTags: ["オン", "オフ", "ハイ", "外"] }),
+      ticket({ name: "猫町スクール第Ⅱ期全6回に「読書会なし」でお申し込み済みの方", price: 950, visibilityTags: ["外"] }),
+      ticket({ name: "通常参加", price: 1100, visibilityTags: ["外"] }),
+      ticket({ name: planName, visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null })
+    ] });
+
+    const outcome = validateEvent(info);
+    expect(outcome.derived.tickets.slice(0, 3).map((entry) => entry.allSessionVariant)).toEqual([
+      expect.objectContaining({ state: "determined", value: "without-reading" }),
+      expect.objectContaining({ state: "determined", value: "reading-set" }),
+      expect.objectContaining({ state: "determined", value: "without-reading" })
+    ]);
+    expect(outcome.validationResults.find((item) => item.ruleId === "SET-006")?.status).toBe("passed");
+  });
+
+  it("still reports duplicate sales targets inside the same all-session application variant", () => {
+    const info = event({ tickets: [
+      ticket({ name: "全6回「読書会セット」でお申し込み済みの方", visibilityTags: ["オン", "オフ", "ハイ", "外"] }),
+      ticket({ name: "全6回「読書会セット」でお申し込み済みの方", visibilityTags: ["オン"] }),
+      ticket({ name: "通常参加", visibilityTags: ["外"] }),
+      ticket({ name: planName, visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null })
+    ] });
+    const validation = validateEvent(info).validationResults.find((item) => item.ruleId === "SET-006");
+
+    expect(validation).toMatchObject({ status: "failed" });
+    expect(validation?.message).toContain("「読書会セット」でお申し込み済み");
+    expect(validation?.message).toContain("重複: オン");
+  });
 
   it.each([
     ["all session only", seriesTickets("全3回"), "SET-006"],
@@ -779,6 +924,18 @@ describe("online guidance", () => {
     const wrongDeadline = validateEvent(event({ tickets: wrongDeadlineTickets }));
     expect(wrongDeadline.validationResults.find((item) => item.ruleId === "SET-015")?.status).toBe("passed");
     expect(wrongDeadline.validationResults.find((item) => item.ruleId === "TKT-009" && item.ticketIds?.includes("ticket-1"))?.status).toBe("failed");
+  });
+
+  it("passes TKT-009 when an entered organizer notice has no deadline time", () => {
+    const tickets = onlineTickets();
+    tickets[0] = { ...tickets[0], organizerNotice: "当日はZoomの表示名をハンドルネームにしてください。" };
+    const validation = validateEvent(event({ tickets })).validationResults
+      .find((item) => item.ruleId === "TKT-009" && item.ticketIds?.includes("ticket-1"));
+
+    expect(validation).toMatchObject({
+      status: "passed",
+      message: expect.stringContaining("締切時刻の記載がないため確認不要")
+    });
   });
 
   it("shows each ticket position and name only once in Slack issue lines", () => {

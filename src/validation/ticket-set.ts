@@ -1,5 +1,5 @@
 import { OPTIONAL_FIRST_TIME_RATE_KEY, RATE_LABELS, REQUIRED_RATE_KEYS } from "../domain/catalog.js";
-import { hasRole, type DerivedEvent, type DerivedTicket, type ParticipationForm, type RulePlan, type ValidationResult } from "../domain/model.js";
+import { hasRole, type AllSessionVariant, type DerivedEvent, type DerivedTicket, type ParticipationForm, type RulePlan, type ValidationResult } from "../domain/model.js";
 import { notificationTargets } from "../policy/rule-plan.js";
 import { nonApplicableResult, result } from "./common.js";
 
@@ -53,9 +53,19 @@ function validateSetPlan(derived: DerivedEvent, plan: RulePlan): ValidationResul
         const forms = formsOf(tickets);
         if (!forms) return unknownSet(plan, metadata, `${key}の参加形態を確定できません`);
         const missingForms = missingParticipationForms(forms);
-        if (missingForms.length > 0) problems.push(`${RATE_LABELS[key]}: ${missingForms.join("・")}`);
+        const unnamedCandidates = tickets.filter((ticket) => ticket.participationForm.state === "determined" && ticket.participationForm.value === "none");
+        missingForms.forEach((missingForm, index) => {
+          problems.push(formatMissingRateForm(key, missingForm, unnamedCandidates[index]));
+        });
       }
-      return setBoolean(plan, metadata, problems.length === 0, problems.length === 0 ? "各料金区分の参加形態はそろっています" : `不足している参加形態: ${problems.join(" / ")}`);
+      const validation = setBoolean(
+        plan,
+        metadata,
+        problems.length === 0,
+        problems.length === 0 ? "各料金区分の参加形態はそろっています" : problems.join(" / ")
+      );
+      // 集合ルールの適用対象全券を見出しに列挙せず、修正候補は本文で不足内容と対応付けて示す。
+      return problems.length === 0 ? validation : { ...validation, ticketIds: undefined };
     }
     case "SET-005": {
       if (attributes.deliveryMode.state !== "determined") return unknownSet(plan, metadata, "開催方法を確定できません");
@@ -67,7 +77,7 @@ function validateSetPlan(derived: DerivedEvent, plan: RulePlan): ValidationResul
       return validateForms(plan, metadata, tickets, "非会員初参加");
     }
     case "SET-006":
-      return validateSeriesCoverage(plan, metadata, sets.allSessionSet, true);
+      return validateAllSessionCoverage(plan, metadata, sets.allSessionSet);
     case "SET-007":
       return validateSeriesCoverage(plan, metadata, sets.partialEntrySet, false);
     case "SET-010": {
@@ -130,12 +140,97 @@ function missingParticipationForms(forms: Set<ParticipationForm>): string[] {
     .filter((value): value is string => value !== undefined);
 }
 
+function formatMissingRateForm(key: keyof typeof RATE_LABELS, missingForm: string, candidate?: DerivedTicket): string {
+  const shortage = `${RATE_LABELS[key]}向けの「${missingForm}」券がありません。`;
+  if (candidate?.name.state === "present") {
+    return `${shortage}修正対象: ${candidate.position}番目「${candidate.name.value}」（券名を「${missingForm}」に変更してください）`;
+  }
+  return `${shortage}${ticketAdditionInstruction(key, missingForm)}`;
+}
+
+function ticketAdditionInstruction(key: keyof typeof RATE_LABELS, form: string): string {
+  const salesTarget: Partial<Record<keyof typeof RATE_LABELS, string>> = {
+    "OFF-LOCAL-1": "オフ",
+    "OFF-HYBRID-1": "ハイ",
+    "OFF-LOCAL-2": "オフ",
+    "OFF-HYBRID-2": "ハイ",
+    "OFF-ONLINE": "オン",
+    "OFF-NONMEMBER": "外"
+  };
+  const recurrence: Partial<Record<keyof typeof RATE_LABELS, string>> = {
+    "OFF-LOCAL-1": "今月1回目",
+    "OFF-HYBRID-1": "今月1回目",
+    "OFF-LOCAL-2": "今月2回目以降",
+    "OFF-HYBRID-2": "今月2回目以降"
+  };
+  const target = salesTarget[key];
+  const recurrenceLabel = recurrence[key];
+  if (!target) return `${RATE_LABELS[key]}向けの「${form}」券を追加してください`;
+  return recurrenceLabel
+    ? `販売対象「${target}」、券名に「${recurrenceLabel}」を含む「${form}」券を追加してください`
+    : `販売対象「${target}」の「${form}」券を追加してください`;
+}
+
 function formsOf(tickets: DerivedTicket[]): Set<ParticipationForm> | undefined {
   if (tickets.some((ticket) => ticket.participationForm.state !== "determined")) return undefined;
   return new Set(tickets.flatMap((ticket) => ticket.participationForm.state === "determined" ? [ticket.participationForm.value] : []));
 }
 
 function validateSeriesCoverage(plan: RulePlan, metadata: Metadata, tickets: DerivedTicket[], enforceDuplicates: boolean): ValidationResult {
+  const coverage = analyzeSeriesCoverage(tickets, enforceDuplicates);
+  if (coverage.duplicates.length > 0 && coverage.hasUnavailableVisibility) return setBoolean(plan, metadata, false, `セット参加券の販売対象を修正してください（重複: ${coverage.duplicates.join(",")}）`);
+  if (coverage.hasUnavailableVisibility) return unknownSet(plan, metadata, "セット参加券の販売対象を取得できません");
+  const ok = coverage.missing.length === 0 && coverage.duplicates.length === 0;
+  return setBoolean(plan, metadata, ok, ok ? "セット参加券の販売対象はそろっています" : `セット参加券の販売対象を修正してください${coverage.missing.length ? `（不足: ${coverage.missing.join(",")}）` : ""}${coverage.duplicates.length ? `（重複: ${coverage.duplicates.join(",")}）` : ""}`);
+}
+
+function validateAllSessionCoverage(plan: RulePlan, metadata: Metadata, tickets: DerivedTicket[]): ValidationResult {
+  const unresolved = tickets.filter((ticket) => ticket.allSessionVariant.state !== "determined");
+  if (unresolved.length > 0) {
+    return { ...unknownSet(plan, metadata, "全回券の申込み内容を判定できません"), ticketIds: unresolved.map((ticket) => ticket.ticketId) };
+  }
+
+  const groups = new Map<AllSessionVariant, DerivedTicket[]>();
+  for (const ticket of tickets) {
+    if (ticket.allSessionVariant.state !== "determined") continue;
+    groups.set(ticket.allSessionVariant.value, [...(groups.get(ticket.allSessionVariant.value) ?? []), ticket]);
+  }
+
+  const problems: string[] = [];
+  const problemTicketIds: string[] = [];
+  for (const [variant, groupTickets] of groups) {
+    const coverage = analyzeSeriesCoverage(groupTickets, true);
+    if (coverage.hasUnavailableVisibility) {
+      return {
+        ...unknownSet(plan, metadata, `${allSessionVariantLabel(variant)}の全回券の販売対象を取得できません`),
+        ticketIds: groupTickets.map((ticket) => ticket.ticketId)
+      };
+    }
+    if (coverage.missing.length === 0 && coverage.duplicates.length === 0) continue;
+    problems.push(`${allSessionVariantLabel(variant)}のセット参加券の販売対象を修正してください${coverage.missing.length ? `（不足: ${coverage.missing.join(",")}）` : ""}${coverage.duplicates.length ? `（重複: ${coverage.duplicates.join(",")}）` : ""}`);
+    problemTicketIds.push(...groupTickets.map((ticket) => ticket.ticketId));
+  }
+
+  if (problems.length > 0) {
+    return {
+      ...setBoolean(plan, metadata, false, problems.join(" / ")),
+      ticketIds: [...new Set(problemTicketIds)]
+    };
+  }
+  return setBoolean(plan, metadata, true, "申込み内容ごとの全回券の販売対象はそろっています");
+}
+
+function allSessionVariantLabel(variant: AllSessionVariant): string {
+  if (variant === "reading-set") return "「読書会セット」でお申し込み済み";
+  if (variant === "without-reading") return "「読書会なし」でお申し込み済み";
+  return "通常";
+}
+
+function analyzeSeriesCoverage(tickets: DerivedTicket[], enforceDuplicates: boolean): {
+  missing: string[];
+  duplicates: string[];
+  hasUnavailableVisibility: boolean;
+} {
   const counts = new Map<string, number>();
   for (const ticket of tickets) {
     if (ticket.visibility.state !== "present") continue;
@@ -151,10 +246,7 @@ function validateSeriesCoverage(plan: RulePlan, metadata: Metadata, tickets: Der
     return firstTimeValues.length !== 2 || new Set(firstTimeValues).size !== 2;
   }).map(([tag]) => tag) : [];
   const hasUnavailableVisibility = tickets.some((ticket) => ticket.visibility.state !== "present");
-  if (duplicates.length > 0 && hasUnavailableVisibility) return setBoolean(plan, metadata, false, `セット参加券の販売対象を修正してください（重複: ${duplicates.join(",")}）`);
-  if (hasUnavailableVisibility) return unknownSet(plan, metadata, "セット参加券の販売対象を取得できません");
-  const ok = missing.length === 0 && duplicates.length === 0;
-  return setBoolean(plan, metadata, ok, ok ? "セット参加券の販売対象はそろっています" : `セット参加券の販売対象を修正してください${missing.length ? `（不足: ${missing.join(",")}）` : ""}${duplicates.length ? `（重複: ${duplicates.join(",")}）` : ""}`);
+  return { missing, duplicates, hasUnavailableVisibility };
 }
 
 function setBoolean(plan: RulePlan, metadata: Metadata, ok: boolean, message: string, details: { expected?: unknown; actual?: unknown } = {}): ValidationResult {

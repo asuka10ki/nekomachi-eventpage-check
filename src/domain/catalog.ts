@@ -19,6 +19,26 @@ export const OPTIONAL_FIRST_TIME_RATE_KEY: Record<DeliveryMode, RateKey> = {
 
 export const NEKOMACHI_PLUS_PRICE = 0;
 export const NEKOMACHI_PLUS_REQUIRED_VISIBILITY = ["オン", "オフ", "ハイ"] as const;
+export const MEMBER_NONMEMBER_FIXED_MEMBER_PRICE = 6000;
+export const MEMBER_NONMEMBER_FIXED_EXTERNAL_PRICE = 8500;
+export const MEMBER_VISIBILITY_TAGS = ["オン", "オフ", "ハイ"] as const;
+
+export type MemberNonmemberAudience = "member" | "external" | "conflict" | "none";
+
+export function memberNonmemberAudience(visibilityTags: string[]): MemberNonmemberAudience {
+  const hasMember = MEMBER_VISIBILITY_TAGS.some((tag) => visibilityTags.includes(tag));
+  const hasExternal = visibilityTags.includes("外");
+  if (hasMember && hasExternal) return "conflict";
+  if (hasMember) return "member";
+  if (hasExternal) return "external";
+  return "none";
+}
+
+export function memberNonmemberFixedPrice(audience: MemberNonmemberAudience): number | null {
+  if (audience === "member") return MEMBER_NONMEMBER_FIXED_MEMBER_PRICE;
+  if (audience === "external") return MEMBER_NONMEMBER_FIXED_EXTERNAL_PRICE;
+  return null;
+}
 
 const NORMAL_PRICES: Record<RateKey, number[]> = {
   "ON-HYBRID": [0],

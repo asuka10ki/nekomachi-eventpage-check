@@ -1,5 +1,10 @@
 import { normalizeEventNameForClassification } from "../utils/normalize.js";
-import { isGuestPrice } from "./catalog.js";
+import {
+  isGuestPrice,
+  MEMBER_NONMEMBER_FIXED_EXTERNAL_PRICE,
+  MEMBER_NONMEMBER_FIXED_MEMBER_PRICE,
+  memberNonmemberAudience
+} from "./catalog.js";
 import { matchedExcludedEventNameMarkers } from "./eligibility.js";
 import { derivedReference, evidence, eventReference, ticketReference } from "./references.js";
 import {
@@ -8,6 +13,7 @@ import {
   observedValue,
   unknown,
   type AppliedComposition,
+  type AllSessionVariant,
   type DeliveryMode,
   type DerivedEvent,
   type DerivedTicket,
@@ -148,7 +154,8 @@ function deriveFirstPassTicket(event: NormalizedEvent, ticket: NormalizedTicket,
       memberLabels: unknown("券名を取得できません", nameEvidence),
       rateKeys: unknown("券名を取得できません", nameEvidence),
       participationForm: unknown("券名を取得できません", nameEvidence),
-      firstTime: unknown("券名を取得できません", nameEvidence)
+      firstTime: unknown("券名を取得できません", nameEvidence),
+      allSessionVariant: unknown("券名を取得できません", nameEvidence)
     };
   }
   const name = ticket.name.value;
@@ -178,8 +185,18 @@ function deriveFirstPassTicket(event: NormalizedEvent, ticket: NormalizedTicket,
     memberLabels: determined(labels, nameEvidence),
     rateKeys,
     participationForm: participationForm(name, nameEvidence),
-    firstTime: determined(name.includes("初参加"), nameEvidence)
+    firstTime: determined(name.includes("初参加"), nameEvidence),
+    allSessionVariant: deriveAllSessionVariant(name, nameEvidence)
   };
+}
+
+function deriveAllSessionVariant(name: string, evidenceItems: DerivationEvidence[]): DerivationResult<AllSessionVariant> {
+  const readingSet = name.includes("「読書会セット」");
+  const withoutReading = name.includes("「読書会なし」");
+  if (readingSet && withoutReading) {
+    return { state: "conflict", candidates: ["reading-set", "without-reading"], evidence: evidenceItems };
+  }
+  return determined(readingSet ? "reading-set" : withoutReading ? "without-reading" : "standard", evidenceItems);
 }
 
 function finishTicketRoles(
@@ -237,10 +254,36 @@ function derivePricingMode(event: NormalizedEvent, tickets: DerivedTicket[], com
     if (ticket.price.state !== "present") return unknown("比較対象券の金額を確定できません", [evidence(ticketReference(event.eventId, ticket, "price"), "固定料金判定に必要な金額を取得不能")]);
     prices.push(ticket.price.value);
   }
-  return determined(prices.length >= 1 && new Set(prices).size === 1 ? "fixed-fee" : "standard", [
+  const tieredCandidate = memberNonmemberFixedFeeCandidate(comparisonSet);
+  const pricingMode = prices.length >= 1 && (new Set(prices).size === 1 || tieredCandidate === "candidate")
+    ? "fixed-fee"
+    : "standard";
+  if (new Set(prices).size > 1 && tieredCandidate === "unknown") {
+    return unknown("会員・非会員別固定料金の販売対象を取得できず料金方式を確定できません", [
+      ...collectionEvidence,
+      ...comparisonSet.flatMap((ticket) => [
+        evidence(ticketReference(event.eventId, ticket, "price"), "会員・非会員別固定料金の候補金額を確認", "normalized-value", "6000・8500"),
+        evidence(ticketReference(event.eventId, ticket, "visibility"), "金額に対応する販売対象を取得不能")
+      ])
+    ]);
+  }
+  return determined(pricingMode, [
     ...collectionEvidence,
-    ...comparisonSet.map((ticket) => evidence(ticketReference(event.eventId, ticket, "price"), "比較対象券の金額が全件同額か確認", "normalized-value"))
+    ...comparisonSet.flatMap((ticket) => [
+      evidence(ticketReference(event.eventId, ticket, "price"), "比較対象券の金額が全件同額、または6000円・8500円の候補金額か確認", "normalized-value"),
+      evidence(ticketReference(event.eventId, ticket, "visibility"), "会員・非会員別固定料金の販売対象行を確認", "normalized-value", "オン・オフ・ハイ／外")
+    ])
   ]);
+}
+
+function memberNonmemberFixedFeeCandidate(tickets: DerivedTicket[]): "candidate" | "not-candidate" | "unknown" {
+  if (tickets.length === 0) return "not-candidate";
+  const candidatePrices = new Set([MEMBER_NONMEMBER_FIXED_MEMBER_PRICE, MEMBER_NONMEMBER_FIXED_EXTERNAL_PRICE]);
+  if (tickets.some((ticket) => ticket.price.state !== "present" || !candidatePrices.has(ticket.price.value))) return "not-candidate";
+  if (tickets.some((ticket) => ticket.visibility.state === "unavailable" || ticket.visibility.state === "invalid")) return "unknown";
+  return tickets.every((ticket) => ticket.visibility.state === "present" && ["member", "external"].includes(memberNonmemberAudience(ticket.visibility.value)))
+    ? "candidate"
+    : "not-candidate";
 }
 
 function deriveFixedFeeType(
@@ -269,6 +312,17 @@ function deriveFixedFeeType(
     }
   }
   if (pricingMode.state !== "determined") return unknown("料金方式を確定できません", [...pricingMode.evidence, ticketCountEvidence, ...roleEvidenceItems, ...visibilityEvidence]);
+  const memberNonmemberCandidate = memberNonmemberFixedFeeCandidate(comparisonSet);
+  const memberNonmemberEvidence = comparisonSet.flatMap((ticket) => [
+    evidence(ticketReference(event.eventId, ticket, "price"), "会員・非会員別固定料金の候補金額を確認", "normalized-value", "6000・8500"),
+    evidence(ticketReference(event.eventId, ticket, "visibility"), "金額を決める販売対象行を確認", "normalized-value", "オン・オフ・ハイ／外")
+  ]);
+  if (memberNonmemberCandidate === "unknown") {
+    return unknown("会員・非会員別固定料金の販売対象を取得できません", [...pricingMode.evidence, ticketCountEvidence, ...roleEvidenceItems, ...visibilityEvidence, ...memberNonmemberEvidence]);
+  }
+  if (memberNonmemberCandidate === "candidate") {
+    return determined("member-nonmember", [...pricingMode.evidence, ticketCountEvidence, ...roleEvidenceItems, ...visibilityEvidence, ...memberNonmemberEvidence]);
+  }
   return determined("standard", [...pricingMode.evidence, ticketCountEvidence, ...roleEvidenceItems, ...visibilityEvidence]);
 }
 

@@ -48,12 +48,17 @@ export function buildRulePlans(derived: DerivedEvent): RulePlan[] {
       ? { applicability: "unknown", reason: "券役割またはrateKeyを確定できません" }
       : simple(normalConfiguration && regular && recurrence.some((key) => key.endsWith("-2")), "2回目条件の通常参加券ではないため"), id);
     add(plans, eventId, "TKT-005", simple(false, "BQ-01により券名の会員種別確認を廃止したため"), id);
-    const priceApplicable = normalConfiguration && regular;
+    const normalPriceApplicable = normalConfiguration && regular;
+    const memberNonmemberFixedPriceApplicable = fixedFeeType === "member-nonmember" && comparison;
     add(plans, eventId, "TKT-006", attributes.pricingMode.state !== "determined" || roleUnknown
       ? { applicability: "unknown", reason: "料金方式または券役割を確定できません" }
-      : priceApplicable
+      : comparison && pricingMode === "fixed-fee" && attributes.fixedFeeType.state !== "determined"
+      ? { applicability: "unknown", reason: "固定料金の種類を確定できません" }
+      : memberNonmemberFixedPriceApplicable
+      ? simple(true, "")
+      : normalPriceApplicable
       ? attributePlan(true, [attributes.pricingScheme, ticket.rateKeys], "")
-      : simple(false, "standardの通常参加券ではないため"), id);
+      : simple(false, "通常料金券または会員・非会員別固定料金券ではないため"), id);
     const visibilityApplicable = !allApplied && !plan && !operation && pricingMode === "standard";
     add(plans, eventId, "TKT-007", roleUnknown || attributes.appliedComposition.state !== "determined"
       ? { applicability: "unknown", reason: "申込み済み構成または券役割を確定できません" }
@@ -71,6 +76,8 @@ export function buildRulePlans(derived: DerivedEvent): RulePlan[] {
       ? { applicability: "unknown", reason: "固定料金の種類を確定できません" }
       : fixedFeeType === "nekomachi-plus"
       ? simple(true, "")
+      : fixedFeeType === "member-nonmember"
+      ? simple(false, "会員・非会員別固定料金は販売対象ごとの金額をTKT-006で確認するため")
       : attributePlan(pricingMode === "fixed-fee", [attributes.pricingMode], "固定料金比較券ではないため"), id);
     add(plans, eventId, "TKT-014", simple(false, "途中参加券のオンライン開催ON必須チェックを廃止したため"), id);
     add(plans, eventId, "TKT-016", roleUnknown
@@ -298,13 +305,13 @@ function applicabilityReferences(derived: DerivedEvent, plan: RulePlan): RulePla
       references.push(ticketReference(derived.event.eventId, ticket, "name"));
       addEvidence(ticket.roles, ticket.rateKeys);
       if (["TKT-006", "TKT-012", "TKT-019", "TKT-020"].includes(plan.ruleId)) references.push(ticketReference(derived.event.eventId, ticket, "price"));
-      if (["TKT-007", "TKT-011", "TKT-013", "TKT-016"].includes(plan.ruleId)) references.push(ticketReference(derived.event.eventId, ticket, "visibility"));
+      if (["TKT-006", "TKT-007", "TKT-011", "TKT-013", "TKT-016"].includes(plan.ruleId)) references.push(ticketReference(derived.event.eventId, ticket, "visibility"));
       if (["TKT-008"].includes(plan.ruleId)) references.push(ticketReference(derived.event.eventId, ticket, "onlineUrl"));
       if (["TKT-009"].includes(plan.ruleId)) references.push(ticketReference(derived.event.eventId, ticket, "organizerNotice"));
       if (["TKT-014", "TKT-017"].includes(plan.ruleId)) references.push(ticketReference(derived.event.eventId, ticket, "onlineEnabled"));
     }
     addEvidence(attributes?.deliveryMode, attributes?.pricingMode, attributes?.pricingScheme);
-    if (["TKT-013", "TKT-020"].includes(plan.ruleId)) addEvidence(attributes?.fixedFeeType);
+    if (["TKT-006", "TKT-013", "TKT-020"].includes(plan.ruleId)) addEvidence(attributes?.fixedFeeType);
     if (plan.ruleId !== "TKT-016") addEvidence(attributes?.appliedComposition);
   } else if (plan.ruleId.startsWith("SET-")) {
     references.push(eventReference(derived.event, "tickets"));
