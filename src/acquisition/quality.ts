@@ -11,8 +11,15 @@ export class AcquisitionError extends Error {
   }
 }
 
+export function isReauthenticationUrl(currentUrl: string): boolean {
+  return ["/admin/reauthentication", "/admin/reauthentication/new"].includes(new URL(currentUrl).pathname.replace(/\/$/, ""));
+}
+
 export function assertAdminSessionIsValid(currentUrl: string, scope: "run" | "event" = "run"): void {
   const pathname = new URL(currentUrl).pathname;
+  if (isReauthenticationUrl(currentUrl)) {
+    throw new AcquisitionError(scope === "run" ? "QUAL-LIST-002" : "QUAL-DETAIL-002", "OSIROの管理者再認証が必要です。メールの確認コードを入力して認証状態を更新してください。", scope);
+  }
   if (pathname === "/login" || pathname.startsWith("/login/")) {
     throw new AcquisitionError(scope === "run" ? "QUAL-LIST-002" : "QUAL-DETAIL-002", "OSIROのログイン状態が期限切れです。npm run auth を実行してログイン状態を更新してください。", scope);
   }

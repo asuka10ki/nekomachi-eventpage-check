@@ -374,6 +374,22 @@ describe("run orchestrator boundaries", () => {
     expect(setup.state.notified).toBe(1);
   });
 
+  it("notifies reauthentication failure and preserves the saved session instead of reporting success", async () => {
+    let sessionSaved = false;
+    let notificationError: Error | undefined;
+    const setup = makeDependencies({
+      collectList: async () => { throw new AcquisitionError("QUAL-LIST-002", "OSIROの管理者再認証を完了できませんでした。"); },
+      saveSession: async () => { sessionSaved = true; },
+      buildMessages: (_summary, error) => { notificationError = error; return [error?.message ?? "success"]; }
+    });
+    const outcome = await runApplication(env, setup.dependencies);
+    expect(outcome).toMatchObject({ runStatus: "authentication-failure", executionStatus: "failed", exitCode: 1 });
+    expect(notificationError?.message).toContain("再認証");
+    expect(sessionSaved).toBe(false);
+    expect(setup.state.notified).toBe(1);
+    expect(setup.state.fetched).toEqual([]);
+  });
+
   it("keeps one detail failure as partial, but stops for list and state failures", async () => {
     let calls = 0;
     const partial = makeDependencies({ fetchDetail: async (_page, item) => {

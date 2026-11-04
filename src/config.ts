@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import type { MailboxConfig } from "./authentication/mailbox.js";
 
 export const EVENT_LIST_URL = "https://nekomachi-club.com/admin/events?state=yet_end";
 export const STORAGE_STATE_PATH = "storageState.json";
@@ -10,6 +11,7 @@ export type AppEnv = {
   headless: boolean;
   artifactRetentionDays?: number;
   artifactCleanupEnabled?: boolean;
+  verificationMailbox?: MailboxConfig;
 };
 
 export function loadEnv(): AppEnv {
@@ -20,8 +22,19 @@ export function loadEnv(): AppEnv {
     slackDryRun: (process.env.SLACK_DRY_RUN || "false").toLowerCase() === "true",
     headless: (process.env.HEADLESS || "true").toLowerCase() !== "false",
     artifactRetentionDays: parseNonNegativeInteger(process.env.ARTIFACT_RETENTION_DAYS, 30, "ARTIFACT_RETENTION_DAYS"),
-    artifactCleanupEnabled: (process.env.ARTIFACT_CLEANUP_ENABLED || "true").toLowerCase() !== "false"
+    artifactCleanupEnabled: (process.env.ARTIFACT_CLEANUP_ENABLED || "true").toLowerCase() !== "false",
+    verificationMailbox: loadMailboxConfig(process.env)
   };
+}
+
+export function loadMailboxConfig(values: NodeJS.ProcessEnv): MailboxConfig | undefined {
+  const username = values.MAIL_USERNAME || values.MAIL_ADDRESS || "";
+  const password = values.MAIL_PASSWORD_OR_APP_PASSWORD || "";
+  if (!username && !password) return undefined;
+  if (!username || !password) throw new Error("MAIL_USERNAMEとMAIL_PASSWORD_OR_APP_PASSWORDを両方設定してください");
+  const port = Number(values.MAIL_IMAP_PORT || "993");
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("MAIL_IMAP_PORTは1〜65535の整数で設定してください");
+  return { host: values.MAIL_IMAP_HOST || "imap.mail.yahoo.co.jp", port, username, password };
 }
 
 function parseNonNegativeInteger(value: string | undefined, fallback: number, name: string): number {

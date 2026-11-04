@@ -1,4 +1,4 @@
-import { expectedNormalPrice, OPTIONAL_FIRST_TIME_RATE_KEY, RATE_LABELS, REQUIRED_RATE_KEYS } from "../domain/catalog.js";
+import { allowedPrices, matchingNormalOfflinePatterns, OPTIONAL_FIRST_TIME_RATE_KEY, RATE_LABELS, REQUIRED_RATE_KEYS } from "../domain/catalog.js";
 import type { DeliveryMode, DerivedEvent, RateKey, RulePlan, ValidationResult } from "../domain/model.js";
 import { nonApplicableResult, result } from "./common.js";
 
@@ -11,7 +11,7 @@ export function validateBody(derived: DerivedEvent, plans: RulePlan[]): Validati
     if (body.state !== "present") {
       return result(plan, group, "BODY", "BODY", body.state === "empty" && plan.ruleId >= "BODY-003" ? "failed" : "unknown", "ページ本文を確認できません", { reason: body.state === "empty" ? "本文が空欄です" : "本文を取得できません" });
     }
-    const fee = feeSection(body.value);
+    const fee = extractBodyFeeSection(body.value);
     if (plan.ruleId === "BODY-001") {
       const invalid = [...fee.matchAll(/(?<!今月)(?<![0-9])1回目/g)].length > 0;
       return result(plan, group, "BODY", "BODY", invalid ? "failed" : "passed", invalid ? "ページ本文の参加費の1回目表記を「今月1回目」にしてください" : "1回目表記は正常です");
@@ -28,6 +28,13 @@ export function validateBody(derived: DerivedEvent, plans: RulePlan[]): Validati
     const problems: string[] = [];
     for (const key of required) checkAmount(key, amounts, problems);
     if (amounts.has(optional)) checkAmount(optional, amounts, problems);
+    if (mode !== "online") {
+      checkOfflineNonmemberBodyConsistency(amounts, problems);
+      const entries = [...amounts].flatMap(([rateKey, prices]) => prices.map((price) => ({ rateKey, price })));
+      if (matchingNormalOfflinePatterns(entries).length === 0) {
+        problems.push("参加費は同じ料金パターンに統一してください（会員1,800円・非会員2,300円または2,000円／会員1,500円・非会員1,800円）");
+      }
+    }
     return result(plan, group, "BODY", "BODY", problems.length === 0 ? "passed" : "failed", problems.length === 0 ? "本文の参加費は正常です" : `ページ本文の参加費を修正してください: ${problems.join(" / ")}`, { actual: Object.fromEntries(amounts) });
   });
 }
@@ -121,12 +128,25 @@ function hasExplicitFeeAudience(row: string): boolean {
 
 function checkAmount(key: RateKey, amounts: Map<RateKey, number[]>, problems: string[]): void {
   const actual = amounts.get(key);
-  const expected = expectedNormalPrice(key);
+  const expected = allowedPrices(key, "normal");
   if (!actual || actual.length === 0) problems.push(`${RATE_LABELS[key]}がありません`);
-  else if (actual.some((amount) => amount !== expected)) problems.push(`${RATE_LABELS[key]}は${expected}円にしてください（実際: ${actual.join(",")}円）`);
+  else if (actual.some((amount) => !expected.includes(amount))) problems.push(`${RATE_LABELS[key]}は${expected.join("円または")}円にしてください（実際: ${actual.join(",")}円）`);
 }
 
-function feeSection(body: string): string {
+function checkOfflineNonmemberBodyConsistency(amounts: Map<RateKey, number[]>, problems: string[]): void {
+  const isAllowed = (amount: number) => allowedPrices("OFF-NONMEMBER", "normal").includes(amount);
+  const regular = [...new Set((amounts.get("OFF-NONMEMBER") ?? []).filter(isAllowed))];
+  const firstTime = [...new Set((amounts.get("OFF-NONMEMBER-FIRST") ?? []).filter(isAllowed))];
+  if (regular.length > 1) {
+    problems.push("非会員料金は選択した料金パターンの金額に統一してください");
+    return;
+  }
+  if (regular.length === 1 && firstTime.some((amount) => amount !== regular[0])) {
+    problems.push(`非会員の通常と初参加を同じ金額にしてください（通常: ${regular[0]}円 / 初参加: ${firstTime.join(",")}円）`);
+  }
+}
+
+export function extractBodyFeeSection(body: string): string {
   const marker = body.search(/(?:^|\n)[^\S\r\n]*(?:(?:■|●|◆|🔴|◾️?)\s*)?(?:読書会)?参加費(?=$|[\s:：（(])/m);
   if (marker < 0) return "";
   const remaining = body.slice(marker);

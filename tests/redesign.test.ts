@@ -174,14 +174,38 @@ describe("new result and classification model", () => {
       .toBe("申込締切日は開催日の3日前から開催日までにしてください。期待: 2026/09/18〜2026/09/21 / 実際: 2026-08-31T23:59");
   });
 
-  it("skips AREA-002 without a bracketed event title and reports equal-length event candidates as unknown", () => {
+  it("skips AREA-002 without a bracketed event title and compares every title component", () => {
     expect(firstStatus(event({ name: "書名の括弧がない読書会", tickets: onlineTickets() }), "AREA-002")).toBe("skipped");
-    expect(firstStatus(event({ name: "『存在』と『時間』を読む", tickets: onlineTickets() }), "AREA-002")).toBe("unknown");
+    expect(firstStatus(event({
+      name: "猫町シネマ ｜レスリー・チャン主演『流星』",
+      tickets: onlineTickets().map((entry) => ({ ...entry, name: entry.name.replace("『存在と時間』", "") }))
+    }), "AREA-002")).toBe("passed");
+    const title = "【村上春樹三連発】『ねじまき鳥クロニクル』〈第1部〉〈第2部〉";
+    const tickets = onlineTickets().map((entry) => ({ ...entry, name: `${title} ${entry.name.replace("『存在と時間』", "")}` }));
+    expect(firstStatus(event({ name: title, tickets }), "AREA-002")).toBe("passed");
+    tickets[0] = { ...tickets[0], name: "【村上春樹三連発】『ねじまき鳥クロニクル』〈第1部〉" };
+    expect(firstStatus(event({ name: title, tickets }), "AREA-002")).toBe("passed");
+    tickets[0] = { ...tickets[0], name: "『ねじまき鳥クロニクル』〈第3部〉" };
+    expect(validateEvent(event({ name: title, tickets })).validationResults.find((item) => item.ruleId === "AREA-002")?.message)
+      .toContain("イベント名にないタイトル要素があります: 〈第3部〉");
+  });
+
+  it("accepts the short book title while still detecting an unrelated book on an individual ticket", () => {
+    const name = "【オンライン】bioshok 有路翔太『知能爆発 　AIの次に来るAGIとは何か、そして人類に何が起きるのか』";
+    const tickets = onlineTickets().map((entry) => ({ ...entry, name: entry.name.replace("『存在と時間』", "bioshok 有路翔太『知能爆発』") }));
+    expect(validateEvent(event({ name, tickets })).eventStatus).toBe("ok");
+    tickets[0] = { ...tickets[0], name: tickets[0].name.replace("『知能爆発』", "『知能爆発 別の副題』") };
+    const outcome = validateEvent(event({ name, tickets }));
+    expect(outcome.validationResults.find((item) => item.ruleId === "AREA-002")).toMatchObject({
+      status: "failed", message: "[1番目] イベント名にないタイトル要素があります: 〈知能爆発 別の副題〉"
+    });
   });
 
   it.each([
     ["文学フリマ大阪", "", "offline"],
     ["【愛知】読書会", "", "offline"],
+    ["【北海道・札幌にて開催】ガルシア・マルケス『エレンディラ』", "", "offline"],
+    ["【北海道・札幌にて開催】読書会", "オフ会場＋オンライン", "hybrid"],
     ["猫町.で、旅をしよう", "", "offline"],
     ["【福岡 第一回】読書会", "", "online"],
     ["通常読書会", "オフ会場＋オンライン", "hybrid"],
@@ -269,6 +293,7 @@ describe("normal ticket composition", () => {
     const outcome = validateEvent(info);
     expect(outcome.validationResults.find((item) => item.ruleId === "SET-010")?.status).toBe("failed");
     expect(outcome.validationResults.filter((item) => item.status === "failed").map((item) => item.ruleId)).toEqual(["SET-010", "SET-011", "SET-015", "AREA-001"]);
+    expect(outcome.validationResults.find((item) => item.ruleId === "AREA-002")?.status).toBe("passed");
     expect(outcome.validationResults.find((item) => item.ruleId === "TKT-009")?.status).toBe("skipped");
     expect(outcome.validationResults.some((item) => item.status === "unknown")).toBe(false);
   });
@@ -342,6 +367,119 @@ describe("offline SET-001 through SET-005 responsibility", () => {
   it("accepts the reading-club fee heading and a second-visit continuation row", () => {
     const body = `🔴読書会参加費\n 地域会員/ハイブリッド会員（今月1回目） 無料\n ※今月2回目以降は1,800円\n オンライン会員 1,800円\n 非会員 2,300円`;
     expect(firstStatus(event({ name: "【愛知】読書会", bodyText: body, tickets: offlineTickets() }), "BODY-004")).toBe("passed");
+  });
+
+  it("accepts the 2000-yen offline nonmember special price for the body and every nonmember ticket", () => {
+    const specialBody = offlineBody.replace("非会員：2,300円", "非会員：2,000円");
+    const tickets = offlineTickets().map((entry) => entry.visibilityTags.includes("外") ? { ...entry, price: 2000 } : entry);
+    tickets.splice(-1, 0,
+      ticket({ name: "非会員 初参加 読書会のみ参加", price: 2000, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null }),
+      ticket({ name: "非会員 初参加 懇親会まで参加", price: 2000, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null })
+    );
+    const outcome = validateEvent(event({ name: "【愛知】観劇読書会", bodyText: specialBody, tickets }));
+
+    expect(outcome.validationResults.find((item) => item.ruleId === "BODY-004")?.status).toBe("passed");
+    const nonmemberPriceResults = outcome.validationResults.filter((item) => item.ruleId === "TKT-006" && item.ticketIds?.some((id) => ["ticket-11", "ticket-12", "ticket-13", "ticket-14"].includes(id)));
+    expect(nonmemberPriceResults).toHaveLength(4);
+    expect(nonmemberPriceResults.every((item) => item.status === "passed")).toBe(true);
+  });
+
+  it("rejects mixing the 2300-yen normal price with the 2000-yen special price", () => {
+    const specialBody = offlineBody.replace("非会員：2,300円", "非会員：2,000円");
+    const tickets = offlineTickets().map((entry) => entry.visibilityTags.includes("外") ? { ...entry, price: 2000 } : entry);
+    const nonmemberReading = tickets.findIndex((entry) => entry.visibilityTags.includes("外"));
+    tickets[nonmemberReading] = { ...tickets[nonmemberReading], price: 2300 };
+    const outcome = validateEvent(event({ name: "【愛知】観劇読書会", bodyText: specialBody, tickets }));
+    const validation = outcome.validationResults.find((item) => item.ruleId === "TKT-006" && item.ticketIds?.includes(`ticket-${nonmemberReading + 1}`));
+
+    expect(validation).toMatchObject({ status: "failed" });
+    expect(validation?.message).toContain("期待: 2000円 / 実際: 2300円");
+  });
+
+  function lowerPriceTickets(): TicketInfo[] {
+    return offlineTickets().map((entry) => ({ ...entry, price: entry.price === 2300 ? 1800 : entry.price === 1800 ? 1500 : entry.price }));
+  }
+  const lowerPriceBody = offlineBody.replaceAll("1,800円", "1,500円").replace("2,300円", "1,800円");
+
+  it.each(["offline", "hybrid"])("accepts the 1500/1800-yen %s pattern including optional first-time tickets", (mode) => {
+    const tickets = lowerPriceTickets();
+    tickets.splice(-1, 0, ...["読書会のみ参加", "懇親会まで参加"].map((form) =>
+      ticket({ name: `非会員 初参加 ${form}`, price: 1800, visibilityTags: ["外"], onlineEnabled: false, onlineUrl: null, organizerNotice: null })
+    ));
+    if (mode === "hybrid") {
+      for (const entry of tickets.filter((entry) => entry.name !== planName)) {
+        entry.onlineEnabled = true;
+        entry.onlineUrl = "https://zoom.example/room";
+        entry.organizerNotice = notice;
+      }
+    }
+    const outcome = validateEvent(event({ name: "【北海道・札幌にて開催】読書会", venue: mode === "hybrid" ? "オフ会場＋オンライン" : "", bodyText: lowerPriceBody, tickets }));
+    expect(outcome.eventStatus).toBe("ok");
+    expect(outcome.derived.attributes?.pricingScheme).toMatchObject({ value: "normal" });
+    expect(outcome.validationResults.find((item) => item.ruleId === "BODY-004")?.status).toBe("passed");
+    const priceResults = outcome.validationResults.filter((item) => item.ruleId === "TKT-006");
+    expect(priceResults.filter((item) => item.status === "passed")).toHaveLength(14);
+    expect(priceResults.find((item) => item.ticketIds?.includes("ticket-15"))?.status).toBe("skipped");
+  });
+
+  it("accepts the lower-price pattern without a body fee section", () => {
+    const outcome = validateEvent(event({ name: "【愛知】読書会", bodyText: "■開催案内", tickets: lowerPriceTickets() }));
+    expect(outcome.eventStatus).toBe("ok");
+  });
+
+  it.each(["with body", "without body"])("rejects mixing member price patterns %s", (bodyMode) => {
+    const tickets = lowerPriceTickets();
+    tickets[4] = { ...tickets[4], price: 1800 };
+    const outcome = validateEvent(event({ name: "【愛知】読書会", bodyText: bodyMode === "with body" ? lowerPriceBody : "■開催案内", tickets }));
+    expect(outcome.validationResults.find((item) => item.ruleId === "TKT-006" && item.ticketIds?.includes("ticket-5"))?.status).toBe("failed");
+  });
+
+  it.each([2000, 2300])("rejects pairing lower member prices with %i-yen nonmember prices", (nonmemberPrice) => {
+    const tickets = lowerPriceTickets().map((entry) => entry.visibilityTags.includes("外") ? { ...entry, price: nonmemberPrice } : entry);
+    const outcome = validateEvent(event({ name: "【愛知】読書会", bodyText: lowerPriceBody.replace("非会員：1,800円", `非会員：${nonmemberPrice}円`), tickets }));
+    expect(outcome.validationResults.find((item) => item.ruleId === "BODY-004")?.status).toBe("failed");
+    expect(outcome.validationResults.some((item) => item.ruleId === "TKT-006" && item.status === "failed")).toBe(true);
+    expect(outcome.validationResults.find((item) => item.ruleId === "TKT-006" && item.ticketIds?.includes("ticket-1"))?.status).toBe("passed");
+  });
+
+  it("rejects member-price mixing inside the body even when all amounts are individually allowed", () => {
+    const body = lowerPriceBody.replace("オンライン会員：1,500円", "オンライン会員：1,800円");
+    const outcome = validateEvent(event({ name: "【愛知】読書会", bodyText: body, tickets: lowerPriceTickets() }));
+    expect(outcome.validationResults.find((item) => item.ruleId === "BODY-004")?.message).toContain("同じ料金パターンに統一してください");
+  });
+
+  it("keeps an unavailable lower-pattern ticket price unknown while validating other tickets", () => {
+    const tickets = lowerPriceTickets();
+    tickets[4] = { ...tickets[4], price: null, fieldAvailability: { price: false } };
+    const outcome = validateEvent(event({ name: "【愛知】読書会", bodyText: lowerPriceBody, tickets }));
+    expect(outcome.validationResults.find((item) => item.ruleId === "TKT-006" && item.ticketIds?.includes("ticket-5"))?.status).toBe("unknown");
+    expect(outcome.eventStatus).not.toBe("ok");
+  });
+
+  it("rejects body/ticket price-pattern differences", () => {
+    const outcome = validateEvent(event({ name: "【愛知】読書会", bodyText: offlineBody, tickets: lowerPriceTickets() }));
+    expect(outcome.validationResults.find((item) => item.ruleId === "BODY-004")?.status).toBe("passed");
+    expect(outcome.validationResults.find((item) => item.ruleId === "TKT-006" && item.ticketIds?.includes("ticket-5"))?.message).toContain("期待: 1800円 / 実際: 1500円");
+  });
+
+  it("rejects mixed nonmember ticket prices even when the body has no fee section", () => {
+    const tickets = offlineTickets();
+    const nonmemberIndexes = tickets.map((entry, index) => entry.visibilityTags.includes("外") ? index : -1).filter((index) => index >= 0);
+    tickets[nonmemberIndexes[0]] = { ...tickets[nonmemberIndexes[0]], price: 2000 };
+    const outcome = validateEvent(event({ name: "【愛知】観劇読書会", bodyText: "■開催案内", tickets }));
+    const validations = outcome.validationResults.filter((item) => item.ruleId === "TKT-006" && item.ticketIds?.some((id) => nonmemberIndexes.map((index) => `ticket-${index + 1}`).includes(id)));
+
+    expect(validations).toHaveLength(2);
+    expect(validations.every((item) => item.status === "failed")).toBe(true);
+    expect(validations[0].message).toContain("同じ料金パターンに統一してください");
+  });
+
+  it("rejects a first-time body price that differs from the event nonmember price", () => {
+    const body = `${offlineBody.replace("非会員：2,300円", "非会員：2,000円")}\n非会員（初参加）：2,300円`;
+    const outcome = validateEvent(event({ name: "【愛知】観劇読書会", bodyText: body, tickets: offlineTickets() }));
+
+    expect(outcome.validationResults.find((item) => item.ruleId === "BODY-004")).toMatchObject({ status: "failed" });
+    expect(outcome.validationResults.find((item) => item.ruleId === "BODY-004")?.message).toContain("通常と初参加を同じ金額にしてください");
   });
 
   it("skips BODY-004 when the body has no fee section", () => {
@@ -650,6 +788,30 @@ describe("member/nonmember fixed fee", () => {
 
 describe("series, applied, beginner and unknown roles", () => {
   const seriesTickets = (label: string) => ["オン", "オフ", "ハイ", "外"].map((tag) => ticket({ name: `${label} ${tag}`, price: 999, visibilityTags: [tag] }));
+
+  it("treats 第N回のみ参加 as a partial-entry ticket and excludes its package price from normal fees", () => {
+    const info = event({
+      name: "【全3回・著者レクチャー】最終回",
+      tickets: [
+        ticket({ name: "全3回参加にお申し込み済の方", price: 0, visibilityTags: ["オン", "オフ", "ハイ", "外"] }),
+        ticket({ name: "第3回のみ参加＋第1回・2回レクチャーアーカイブ付", price: 5000, visibilityTags: ["外"] }),
+        ticket({ name: "初参加 第3回のみ参加＋第1回・2回レクチャーアーカイブ付", price: 5000, visibilityTags: ["外"] }),
+        ticket({ name: "第3回のみ参加＋第1回・2回レクチャーアーカイブ付", price: 4000, visibilityTags: ["オフ"] }),
+        ticket({ name: "第3回のみ参加＋第1回・2回レクチャーアーカイブ付", price: 3000, visibilityTags: ["オン", "ハイ"] }),
+        ticket({ name: planName, visibilityTags: ["A", "U-22", "B"], onlineEnabled: false, onlineUrl: null, organizerNotice: null })
+      ]
+    });
+    const outcome = validateEvent(info);
+
+    for (const derivedTicket of outcome.derived.tickets.slice(1, 5)) {
+      expect(derivedTicket.roles).toMatchObject({ state: "determined", value: expect.arrayContaining(["partial-entry"]) });
+    }
+    expect(outcome.derived.sets?.partialEntrySet).toHaveLength(4);
+    expect(outcome.derived.sets?.pricingComparisonSet).toHaveLength(0);
+    expect(outcome.validationResults.find((item) => item.ruleId === "TKT-006" && item.ticketIds?.includes("ticket-2"))?.status).toBe("skipped");
+    expect(outcome.validationResults.find((item) => item.ruleId === "SET-001")?.status).toBe("skipped");
+    expect(outcome.validationResults.find((item) => item.ruleId === "SET-007")?.status).toBe("passed");
+  });
 
   it("checks all-session sales targets separately for reading-set and without-reading applications", () => {
     const info = event({ tickets: [
@@ -1065,11 +1227,11 @@ describe("online guidance", () => {
 });
 
 describe("guest classification", () => {
-  function guestOnline(): TicketInfo[] {
+  function guestOnline(firstVisitPrice = 550): TicketInfo[] {
     return [
-      ticket({ name: "ハイブリッド会員", price: 550, visibilityTags: ["ハイ"] }),
+      ticket({ name: "ハイブリッド会員", price: firstVisitPrice, visibilityTags: ["ハイ"] }),
       ticket({ name: "地域会員", price: 1200, visibilityTags: ["オフ"] }),
-      ticket({ name: "オンライン会員（今月1回目）", price: 550, visibilityTags: ["オン"] }),
+      ticket({ name: "オンライン会員（今月1回目）", price: firstVisitPrice, visibilityTags: ["オン"] }),
       ticket({ name: "オンライン会員（今月2回目以降）", price: 1200, visibilityTags: ["オン"] }),
       ticket({ name: "非会員", price: 1500, visibilityTags: ["外"] })
     ];
@@ -1080,6 +1242,18 @@ describe("guest classification", () => {
     const oneWrong = guestOnline();
     oneWrong[0] = { ...oneWrong[0], price: 600 };
     expect(deriveEvent(normalizeEvent(event({ tickets: oneWrong }))).attributes?.pricingScheme).toMatchObject({ state: "determined", value: "normal" });
+  });
+
+  it("accepts the 500-yen guest online pattern", () => {
+    const info = event({ tickets: guestOnline(500) });
+    expect(deriveEvent(normalizeEvent(info)).attributes?.pricingScheme).toMatchObject({ state: "determined", value: "guest" });
+    expect(validateEvent(info).validationResults.filter((item) => item.ruleId === "TKT-006" && item.status === "failed")).toEqual([]);
+  });
+
+  it("does not combine the 500-yen and 550-yen guest online patterns", () => {
+    const mixed = guestOnline(500);
+    mixed[0] = { ...mixed[0], price: 550 };
+    expect(deriveEvent(normalizeEvent(event({ tickets: mixed }))).attributes?.pricingScheme).toMatchObject({ state: "determined", value: "normal" });
   });
 });
 

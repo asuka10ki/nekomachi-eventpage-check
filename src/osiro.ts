@@ -1,5 +1,6 @@
 import type { BrowserContext, Locator, Page } from "playwright";
 import type { EventInfo, EventListItem, TicketInfo } from "./types.js";
+import type { AuthenticationHandler } from "./authentication/osiro.js";
 import { normalizePriceText, normalizeVisibilityTags } from "./utils/normalize.js";
 import { matchedExcludedEventNameMarkers } from "./domain/eligibility.js";
 import { parseJapaneseDateTime } from "./utils/date.js";
@@ -43,18 +44,20 @@ export type RawAdminEventFormData = {
   }[];
 };
 
-export async function collectEventList(page: Page, listUrl: string): Promise<EventListItem[]> {
+export async function collectEventList(page: Page, listUrl: string, authenticate?: AuthenticationHandler): Promise<EventListItem[]> {
   const response = await page.goto(listUrl, { waitUntil: "domcontentloaded" });
   assertSuccessfulHttpResponse(page.url(), response?.status() ?? null, response?.ok() ?? false);
+  await authenticate?.(page, listUrl);
   assertAdminSessionIsValid(page.url());
   await assertAdminEventListPage(page);
   const items = await collectCurrentPageEvents(page);
   return dedupeByUrl(items);
 }
 
-export async function collectEventListWithPagination(page: Page, listUrl: string, maxPages = 20): Promise<EventListItem[]> {
+export async function collectEventListWithPagination(page: Page, listUrl: string, maxPages = 20, authenticate?: AuthenticationHandler): Promise<EventListItem[]> {
   const response = await page.goto(listUrl, { waitUntil: "domcontentloaded" });
   assertSuccessfulHttpResponse(page.url(), response?.status() ?? null, response?.ok() ?? false);
+  await authenticate?.(page, listUrl);
   assertAdminSessionIsValid(page.url());
   const all: EventListItem[] = [];
   const visitedPages = new Set<string>();
@@ -82,20 +85,23 @@ export async function collectEventListWithPagination(page: Page, listUrl: string
         next.first().click()
       ]))[0];
     assertSuccessfulHttpResponse(page.url(), navigationResponse?.status() ?? null, navigationResponse?.ok() ?? false);
+    let originalRequest = navigationResponse?.request();
+    while (originalRequest?.redirectedFrom()) originalRequest = originalRequest.redirectedFrom() ?? undefined;
+    await authenticate?.(page, nextHref ? new URL(nextHref, previousUrl).toString() : originalRequest?.url() ?? page.url());
     assertAdminSessionIsValid(page.url());
     assertPaginationAdvanced(previousUrl, page.url());
   }
   return dedupeByUrl(all);
 }
 
-export async function collectEventListsWithPagination(page: Page, listUrl: string, maxPages = 20): Promise<EventListItem[]> {
-  return collectEventListWithPagination(page, listUrl, maxPages);
+export async function collectEventListsWithPagination(page: Page, listUrl: string, maxPages = 20, authenticate?: AuthenticationHandler): Promise<EventListItem[]> {
+  return collectEventListWithPagination(page, listUrl, maxPages, authenticate);
 }
 
-export async function fetchEventInfo(context: BrowserContext, item: EventListItem): Promise<EventInfo> {
+export async function fetchEventInfo(context: BrowserContext, item: EventListItem, options: DetailWaitOptions = {}): Promise<EventInfo> {
   const page = await context.newPage();
   try {
-    return await fetchEventInfoFromPage(page, item);
+    return await fetchEventInfoFromPage(page, item, options);
   } finally {
     await page.close();
   }
@@ -104,6 +110,7 @@ export async function fetchEventInfo(context: BrowserContext, item: EventListIte
 export type DetailWaitOptions = {
   navigationTimeoutMs?: number;
   domTimeoutMs?: number;
+  authenticate?: AuthenticationHandler;
 };
 
 export async function fetchEventInfoFromPage(page: Page, item: EventListItem, options: DetailWaitOptions = {}): Promise<EventInfo> {
@@ -111,6 +118,7 @@ export async function fetchEventInfoFromPage(page: Page, item: EventListItem, op
     const domTimeoutMs = options.domTimeoutMs ?? 15000;
     const response = await page.goto(item.detailUrl, { waitUntil: "domcontentloaded", timeout: navigationTimeoutMs });
     assertSuccessfulHttpResponse(page.url(), response?.status() ?? null, response?.ok() ?? false, "event");
+    await options.authenticate?.(page, item.detailUrl);
     assertAdminSessionIsValid(page.url(), "event");
     await waitForAdminEventDetailIdentity(page, domTimeoutMs);
 

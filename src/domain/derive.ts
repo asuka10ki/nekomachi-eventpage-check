@@ -1,6 +1,6 @@
 import { normalizeEventNameForClassification } from "../utils/normalize.js";
 import {
-  isGuestPrice,
+  matchesGuestPriceConfiguration,
   MEMBER_NONMEMBER_FIXED_EXTERNAL_PRICE,
   MEMBER_NONMEMBER_FIXED_MEMBER_PRICE,
   memberNonmemberAudience
@@ -139,7 +139,7 @@ function deriveDeliveryMode(event: NormalizedEvent): DerivationResult<DeliveryMo
   const nameEvidence = evidence(eventReference(event, "name"), "オフライン開催マーカーをイベント名で確認", "partial");
   if (event.name.state !== "present") return unknown("イベント名を取得できません", [venueEvidence, nameEvidence]);
   const name = normalizeEventNameForClassification(event.name.value);
-  const markers = ["【東京】", "【大阪】", "【京都】", "【福岡】", "【名古屋】", "【愛知】", "東京開催", "文学フリマ", "猫町.で、旅をしよう"];
+  const markers = ["【東京】", "【大阪】", "【京都】", "【福岡】", "【名古屋】", "【愛知】", "【北海道・札幌にて開催】", "東京開催", "文学フリマ", "猫町.で、旅をしよう"];
   const offline = markers.some((marker) => name.includes(marker));
   return determined(offline ? "offline" : "online", [venueEvidence, nameEvidence]);
 }
@@ -164,7 +164,7 @@ function deriveFirstPassTicket(event: NormalizedEvent, ticket: NormalizedTicket,
   if (name.includes("運営メンバー")) candidates.push("operation-member");
   if (/お申し込み済み?の方/.test(name)) candidates.push("already-applied");
   if (/全\s*[0-9]+\s*回/.test(name)) candidates.push("all-session-entry");
-  if (/第\s*[0-9]+\s*回から参加/.test(name)) candidates.push("partial-entry");
+  if (/第\s*[0-9]+\s*回(?:から|のみ)参加/.test(name)) candidates.push("partial-entry");
   const labels = memberLabels(name);
   const currentTags = ticket.visibility.state === "present" && ticket.visibility.value.some((tag) => ["オン", "オフ", "ハイ", "外"].includes(tag));
   if (!candidates.includes("plan-change") && !candidates.includes("operation-member") && currentTags) candidates.push("member-entry");
@@ -338,17 +338,15 @@ function derivePricingScheme(
     ...pricingMode.evidence,
     ...sets.pricingComparisonSet.flatMap((ticket) => ticket.roles.evidence)
   ]);
+  const guestEntries: Array<{ rateKeys: RateKey[]; price: number }> = [];
   for (const ticket of sets.regularEntrySet) {
     if (ticket.price.state !== "present" || ticket.rateKeys.state !== "determined") return unknown("料金またはrateKeyを確定できません", [
       evidence(derivedReference(ticket.rateKeys.evidence[0]?.reference.eventId ?? "unknown", "pricingScheme", ticket), "料金またはrateKeyが取得不能"),
       ...ticket.rateKeys.evidence
     ]);
+    guestEntries.push({ rateKeys: ticket.rateKeys.value, price: ticket.price.value });
   }
-  const allGuest = sets.regularEntrySet.every((ticket) => {
-    if (ticket.price.state !== "present" || ticket.rateKeys.state !== "determined") return false;
-    const price = ticket.price.value;
-    return ticket.rateKeys.value.every((key) => isGuestPrice(key, price));
-  });
+  const allGuest = matchesGuestPriceConfiguration(deliveryMode.value, guestEntries);
   return determined(allGuest ? "guest" : "normal", [
     ...pricingMode.evidence,
     ...deliveryMode.evidence,

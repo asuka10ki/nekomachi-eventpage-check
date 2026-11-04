@@ -8,7 +8,13 @@ import {
 } from "../src/utils/date.js";
 import { normalizePriceText, normalizeTicketText, normalizeVisibilityTags } from "../src/utils/normalize.js";
 import { normalizeOnlineUrl } from "../src/utils/url.js";
-import { extractBookTitle, resolveEventBookTitle, validateTicketNameBookTitle } from "../src/utils/ticket.js";
+import {
+  extractBookTitle,
+  extractTitleComponents,
+  resolveEventBookTitle,
+  validateTicketNameBookTitle,
+  validateTicketNameTitleComponents
+} from "../src/utils/ticket.js";
 import { validateEvent } from "../src/validation/engine.js";
 import { buildFatalErrorMessage, buildSlackMessages, isRetryableSlackFailure } from "../src/slack.js";
 import { sortEventsByStartAtDesc } from "../src/utils/sort.js";
@@ -177,17 +183,54 @@ describe("book title", () => {
     expect(validateTicketNameBookTitle("『存在と時間』読書会", "『純粋理性批判』オンライン会員 1回目")).toContain("別の本");
     expect(validateTicketNameBookTitle("『存在と時間』読書会", "『存在と時間』『純粋理性批判』セット")).toContain("『純粋理性批判』");
   });
+
+  it("extracts and validates every bracketed title component", () => {
+    const eventName = "【村上春樹三連発】『ねじまき鳥クロニクル』〈第1部〉〈第2部〉";
+    expect(extractTitleComponents(eventName)).toEqual([
+      "村上春樹三連発",
+      "ねじまき鳥クロニクル",
+      "第1部",
+      "第2部"
+    ]);
+    expect(validateTicketNameTitleComponents(eventName, `${eventName} オンライン参加`)).toBeNull();
+    expect(validateTicketNameTitleComponents("猫町シネマ ｜レスリー・チャン主演『流星』", "オンライン参加 ※今月1回目")).toBeNull();
+    expect(validateTicketNameTitleComponents(eventName, "【村上春樹三連発】『ねじまき鳥クロニクル』〈第1部〉"))
+      .toBeNull();
+    expect(validateTicketNameTitleComponents(eventName, "『ねじまき鳥クロニクル』〈第3部〉"))
+      .toBe("イベント名にないタイトル要素があります: 〈第3部〉");
+  });
+
+  it.each([" ", "　", "：", ":", "―", "—", "–", "－", "-"])("allows a book subtitle omitted after the separator %s", (separator) => {
+    expect(validateTicketNameTitleComponents(`『知能爆発${separator}AIの次に来るAGIとは何か』`, "『知能爆発』 ※今月1回目")).toBeNull();
+  });
+
+  it.each([
+    ["『知能爆発 AIの次に来るAGIとは何か』", "『知能』"],
+    ["『知能爆発 AIの次に来るAGIとは何か』", "『AIの次に来るAGIとは何か』"],
+    ["『知能爆発 AIの次に来るAGIとは何か』", "『知能爆発 別の副題』"],
+    ["『知能爆発』", "『知能爆発 別の副題』"],
+    ["【村上春樹三連発 特別編】『ねじまき鳥クロニクル』", "【村上春樹三連発】『ねじまき鳥クロニクル』"],
+    ["『ねじまき鳥クロニクル』〈第3部 鳥刺し男編〉", "『ねじまき鳥クロニクル』〈第3部〉"],
+    ["『ねじまき鳥クロニクル』〈第10部〉", "『ねじまき鳥クロニクル』〈第1部〉"]
+  ])("keeps unrelated titles, labels and part numbers strict: %s / %s", (eventName, ticketName) => {
+    expect(validateTicketNameTitleComponents(eventName, ticketName)).toContain("イベント名にないタイトル要素");
+  });
 });
 
 describe("canonical price and visibility catalog", () => {
-  it("locks every normal price and required visibility to the TypeScript catalog", () => {
+  it("locks every normal and guest price and required visibility to the TypeScript catalog", () => {
     expect(REQUIRED_RATE_KEYS.online).toEqual(["ON-HYBRID", "ON-LOCAL", "ON-ONLINE-1", "ON-ONLINE-2", "ON-NONMEMBER"]);
     expect(REQUIRED_RATE_KEYS.offline).toEqual(["OFF-LOCAL-1", "OFF-HYBRID-1", "OFF-LOCAL-2", "OFF-HYBRID-2", "OFF-ONLINE", "OFF-NONMEMBER"]);
     expect(Object.keys(RATE_VISIBILITY)).toEqual(ALL_RATE_KEYS);
     expect(Object.fromEntries(ALL_RATE_KEYS.map((key) => [key, allowedPrices(key, "normal")])))
       .toEqual({
         "ON-HYBRID": [0], "ON-LOCAL": [800], "ON-ONLINE-1": [0], "ON-ONLINE-2": [800], "ON-NONMEMBER": [1100], "ON-NONMEMBER-FIRST": [1100],
-        "OFF-LOCAL-1": [0], "OFF-HYBRID-1": [0], "OFF-LOCAL-2": [1800], "OFF-HYBRID-2": [1800], "OFF-ONLINE": [1800], "OFF-NONMEMBER": [2300], "OFF-NONMEMBER-FIRST": [2300]
+        "OFF-LOCAL-1": [0], "OFF-HYBRID-1": [0], "OFF-LOCAL-2": [1800, 1500], "OFF-HYBRID-2": [1800, 1500], "OFF-ONLINE": [1800, 1500], "OFF-NONMEMBER": [2300, 2000, 1800], "OFF-NONMEMBER-FIRST": [2300, 2000, 1800]
+      });
+    expect(Object.fromEntries(ALL_RATE_KEYS.map((key) => [key, allowedPrices(key, "guest")])))
+      .toEqual({
+        "ON-HYBRID": [550, 500], "ON-LOCAL": [1200], "ON-ONLINE-1": [550, 500], "ON-ONLINE-2": [1200], "ON-NONMEMBER": [1500], "ON-NONMEMBER-FIRST": [1500],
+        "OFF-LOCAL-1": [800, 500], "OFF-HYBRID-1": [800, 500], "OFF-LOCAL-2": [3000, 2300], "OFF-HYBRID-2": [3000, 2300], "OFF-ONLINE": [3000, 2300], "OFF-NONMEMBER": [3500, 2800], "OFF-NONMEMBER-FIRST": [3500, 2800]
       });
   });
 });

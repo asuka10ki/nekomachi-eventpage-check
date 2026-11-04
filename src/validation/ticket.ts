@@ -1,8 +1,9 @@
-import { allowedPrices, memberNonmemberAudience, memberNonmemberFixedPrice, NEKOMACHI_PLUS_PRICE, NEKOMACHI_PLUS_REQUIRED_VISIBILITY } from "../domain/catalog.js";
+import { allowedPrices, isOfflineRateKey, matchingNormalOfflinePatterns, memberNonmemberAudience, memberNonmemberFixedPrice, NEKOMACHI_PLUS_PRICE, NEKOMACHI_PLUS_REQUIRED_VISIBILITY, type OfflinePricePattern } from "../domain/catalog.js";
 import type { DerivedEvent, DerivedTicket, RulePlan, ValidationResult } from "../domain/model.js";
 import { extractDeadlineTimeFromNotice, formatHourMinute } from "../utils/date.js";
 import { normalizeCommonText } from "../utils/normalize.js";
 import { nonApplicableResult, result } from "./common.js";
+import { extractBodyFeeSection, parseBodyFeeMap } from "./body.js";
 
 const PLAN_CHANGE_TEXT = "プラン変更後にお申し込み下さい。プラン変更前は参加ボタンは押さないでください。";
 
@@ -116,9 +117,35 @@ function validatePrice(plan: RulePlan, derived: DerivedEvent, ticket: DerivedTic
   }
   const scheme = derived.attributes.pricingScheme.value;
   const sets = ticket.rateKeys.value.map((key) => new Set(allowedPrices(key, scheme)));
-  const common = sets.length === 0 ? [] : [...sets[0]].filter((price) => sets.every((set) => set.has(price)));
+  let common = sets.length === 0 ? [] : [...sets[0]].filter((price) => sets.every((set) => set.has(price)));
+  if (scheme === "normal" && ticket.rateKeys.value.some((key) => isOfflineRateKey(key) && allowedPrices(key, scheme).length > 1)) {
+    const patterns = resolveOfflinePricePatterns(derived);
+    if (patterns.length === 0) {
+      return result(plan, "料金", "TICKET", "EACH_TICKET", "failed", `${label}: 本文とチケットを同じ料金パターンに統一してください（会員1,800円・非会員2,300円または2,000円／会員1,500円・非会員1,800円）`, { actual: ticket.price.value });
+    }
+    common = common.filter((price) => patterns.some((pattern) => ticket.rateKeys.state === "determined"
+      && ticket.rateKeys.value.every((key) => isOfflineRateKey(key) && pattern[key] === price)));
+  }
   const ok = common.includes(ticket.price.value);
   return result(plan, "料金", "TICKET", "EACH_TICKET", ok ? "passed" : "failed", ok ? `${label}: 金額は正常です` : `${label}: 金額が許可金額と異なります。期待: ${common.join("円 または ")}円 / 実際: ${ticket.price.value}円`, { expected: common, actual: ticket.price.value });
+}
+
+function resolveOfflinePricePatterns(derived: DerivedEvent): OfflinePricePattern[] {
+  const bodyEntries = [];
+  if (derived.event.bodyText.state === "present") {
+    const bodyAmounts = parseBodyFeeMap(extractBodyFeeSection(derived.event.bodyText.value), "offline");
+    for (const [rateKey, prices] of bodyAmounts) {
+      bodyEntries.push(...prices.map((price) => ({ rateKey, price })));
+    }
+  }
+  const bodyPatterns = matchingNormalOfflinePatterns(bodyEntries);
+  if (bodyPatterns.length <= 1) return bodyPatterns;
+  const ticketEntries = (derived.sets?.regularEntrySet ?? []).flatMap((candidate) => {
+    if (candidate.rateKeys.state !== "determined" || candidate.price.state !== "present") return [];
+    const price = candidate.price.value;
+    return candidate.rateKeys.value.map((rateKey) => ({ rateKey, price }));
+  });
+  return matchingNormalOfflinePatterns(ticketEntries, bodyPatterns);
 }
 
 function validateVisibility(plan: RulePlan, ticket: DerivedTicket, label: string): ValidationResult {

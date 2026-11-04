@@ -2,6 +2,9 @@ import fs from "node:fs";
 import { chromium } from "playwright";
 import { EVENT_LIST_URL, loadEnv, STORAGE_STATE_PATH } from "./config.js";
 import { collectEventListsWithPagination } from "./osiro.js";
+import { createAuthenticationHandler } from "./authentication/osiro.js";
+import { assertAdminEventListPageState } from "./acquisition/quality.js";
+import { saveStorageStateAtomically } from "./run/persistence.js";
 
 async function main(): Promise<void> {
   const env = loadEnv();
@@ -14,7 +17,9 @@ async function main(): Promise<void> {
   const page = await context.newPage();
 
   try {
-    const events = await collectEventListsWithPagination(page, EVENT_LIST_URL);
+    const events = await collectEventListsWithPagination(page, EVENT_LIST_URL, 20, createAuthenticationHandler(env.verificationMailbox));
+    assertAdminEventListPageState(page.url(), await page.locator("#eventIndex").count() > 0);
+    await saveStorageStateAtomically(context, STORAGE_STATE_PATH);
     console.log(`取得件数: ${events.length}`);
     events.forEach((event, index) => {
       console.log(`${index + 1}. ${event.name}`);

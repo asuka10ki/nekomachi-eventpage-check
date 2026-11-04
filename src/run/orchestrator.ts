@@ -16,6 +16,7 @@ import { validateEvent } from "../validation/engine.js";
 import type { EventDisplayContext, EventValidationOutcome, ObservedReference, ValidationResult } from "../domain/model.js";
 import type { RunSummary } from "../results/model.js";
 import { pruneExpiredArtifacts } from "../artifacts/manager.js";
+import { createAuthenticationHandler } from "../authentication/osiro.js";
 
 export type RuntimePage = Closable;
 export type RuntimeContext = StorageStateWriter & { newPage(): Promise<RuntimePage> };
@@ -25,8 +26,8 @@ export type RunDependencies = {
   storageStateExists(filePath: string): boolean;
   cleanupArtifacts(retentionDays: number): Promise<void>;
   launchRuntime(headless: boolean, storageStatePath: string): Promise<RuntimeHandles>;
-  collectList(page: RuntimePage, listUrl: string): Promise<EventListItem[]>;
-  fetchDetail(page: RuntimePage, item: EventListItem): Promise<EventInfo>;
+  collectList(page: RuntimePage, listUrl: string, env: AppEnv): Promise<EventListItem[]>;
+  fetchDetail(page: RuntimePage, item: EventListItem, env: AppEnv): Promise<EventInfo>;
   checkEvent(event: EventInfo): EventValidationOutcome;
   saveArtifact(page: RuntimePage, eventName: string): Promise<void>;
   loadEventCount(): Promise<number | null>;
@@ -53,8 +54,8 @@ export const defaultRunDependencies: RunDependencies = {
       throw error;
     }
   },
-  collectList: (page, listUrl) => collectEventListsWithPagination(page as Page, listUrl),
-  fetchDetail: (page, item) => fetchEventInfoFromPage(page as Page, item),
+  collectList: (page, listUrl, env) => collectEventListsWithPagination(page as Page, listUrl, 20, createAuthenticationHandler(env.verificationMailbox)),
+  fetchDetail: (page, item, env) => fetchEventInfoFromPage(page as Page, item, { authenticate: createAuthenticationHandler(env.verificationMailbox) }),
   checkEvent: (event) => validateEvent(event),
   saveArtifact: (page, eventName) => saveFailureArtifacts(page as Page, eventName),
   loadEventCount: () => loadPreviousEventCount(),
@@ -130,7 +131,7 @@ export async function runApplication(env: AppEnv, dependencies: RunDependencies 
 
     if (!fatalError && runtime) {
       try {
-        listItems = await dependencies.collectList(runtime.listPage, EVENT_LIST_URL);
+        listItems = await dependencies.collectList(runtime.listPage, EVENT_LIST_URL, env);
         assertEventCountHasNotDroppedUnexpectedly(previousCount, listItems.length);
         stages.push({ stage: "list-acquisition", status: "completed", references: [runReference("LIST_PAGE", "EVENT", "eventList", "present")] });
       } catch (error) {
@@ -148,7 +149,7 @@ export async function runApplication(env: AppEnv, dependencies: RunDependencies 
         try {
           let event: EventInfo | undefined;
           try {
-            event = await dependencies.fetchDetail(detailPage, item);
+            event = await dependencies.fetchDetail(detailPage, item, env);
             stages.push({ stage: "detail-acquisition", status: "completed", eventId: item.detailUrl, references: [runReference("DETAIL_PAGE", "EVENT", "eventDetail", "present", undefined, item.detailUrl)] });
           } catch (error) {
             if (isAuthenticationFailure(error)) {

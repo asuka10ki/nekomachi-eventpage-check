@@ -17,6 +17,8 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
+    "imapflow": "^2.8.0",
+    "mailparser": "^3.12.2",
     "playwright": "^1.45.0",
     "tsx": "^4.16.0"
   },

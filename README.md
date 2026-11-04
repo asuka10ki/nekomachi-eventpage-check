@@ -23,7 +23,9 @@ npx playwright install chromium
 npm run auth
 ```
 
-表示されたブラウザでログインし、完了後にターミナルでEnterを押します。認証状態はプロジェクト直下の`storageState.json`へ保存されます。このファイルにはCookieが含まれるためGit管理・共有・artifact削除の対象にしません。通常のチェック成功時にも、OSIRO側で延長された認証状態を原子的に書き戻します。
+表示されたブラウザでログインし、完了後にターミナルでEnterを押します。管理画面へのアクセスを確認できた場合だけ、認証状態をプロジェクト直下の`storageState.json`へ保存します。このファイルにはCookieが含まれるためGit管理・共有・artifact削除の対象にしません。通常のチェック成功時にも、OSIRO側で延長された認証状態を原子的に書き戻します。
+
+メールの確認コードによる管理者再認証は、下記のIMAP設定があれば`check`・`list`・`auth`で自動処理します。コード再送前のメールUIDを記録し、再送後の新着メールのうち、差出人`info@nekomachi-club.com`・件名`【猫町.】管理ツールの確認コード`・発行から10分未満を満たすコードを最大120秒待ちます。受信箱は読み取り専用で開き、メールを既読にしません。コード・パスワード・メール本文はログやSlackへ出しません。通常のログイン切れは引き続き手動ログインが必要です。
 
 ## 環境変数
 
@@ -35,6 +37,10 @@ npm run auth
 | `SLACK_CHANNEL_ID` | 本番通知時 | なし | 通知先チャンネルID |
 | `SLACK_DRY_RUN` | いいえ | `false` | `true`なら本文生成だけを行いSlackへ送信しない |
 | `HEADLESS` | いいえ | `true` | `false`ならチェック用ブラウザを表示する |
+| `MAIL_IMAP_HOST` | 再認証自動処理時 | `imap.mail.yahoo.co.jp` | TLS接続するIMAPホスト |
+| `MAIL_IMAP_PORT` | いいえ | `993` | IMAP TLSポート |
+| `MAIL_USERNAME` | 再認証自動処理時 | なし | メールのログイン名。`MAIL_ADDRESS`でも指定可 |
+| `MAIL_PASSWORD_OR_APP_PASSWORD` | 再認証自動処理時 | なし | メールパスワードまたはアプリパスワード |
 | `ARTIFACT_RETENTION_DAYS` | いいえ | `30` | 障害調査artifactの保存日数。0以上の整数 |
 | `ARTIFACT_CLEANUP_ENABLED` | いいえ | `true` | `false`なら起動時の期限切れartifact削除を停止する |
 

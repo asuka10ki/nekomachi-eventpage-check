@@ -1,15 +1,15 @@
 import { hasRole, type DerivedEvent, type RulePlan, type ValidationResult } from "../domain/model.js";
 import { extractReceptionStartTimeFromBody, extractReceptionStartTimeFromNotice } from "../utils/date.js";
-import { resolveEventBookTitle, validateTicketNameBookTitle } from "../utils/ticket.js";
+import { extractTitleComponents, validateTicketNameTitleComponents } from "../utils/ticket.js";
 import { receptionNoticeTargets } from "../policy/rule-plan.js";
 import { nonApplicableResult, result } from "./common.js";
 
 export function validateCrossArea(derived: DerivedEvent, plans: RulePlan[]): ValidationResult[] {
   return plans.filter((plan) => plan.ruleId === "AREA-001" || plan.ruleId === "AREA-002").map((plan) => {
-    const group = plan.ruleId === "AREA-001" ? "オンライン案内" : "書名";
+    const group = plan.ruleId === "AREA-001" ? "オンライン案内" : "タイトル";
     const nonApplicable = nonApplicableResult(plan, group, "MULTI_AREA", "CROSS_AREA");
     if (nonApplicable) return nonApplicable;
-    return plan.ruleId === "AREA-001" ? validateReception(derived, plan) : validateBookTitles(derived, plan);
+    return plan.ruleId === "AREA-001" ? validateReception(derived, plan) : validateTitleComponents(derived, plan);
   });
 }
 
@@ -40,20 +40,16 @@ function validateReception(derived: DerivedEvent, plan: RulePlan): ValidationRes
   return result(plan, "オンライン案内", "MULTI_AREA", "CROSS_AREA", "passed", "本文と各券のお知らせの受付開始時刻は一致しています");
 }
 
-function validateBookTitles(derived: DerivedEvent, plan: RulePlan): ValidationResult {
-  if (derived.event.name.state !== "present") return result(plan, "書名", "MULTI_AREA", "CROSS_AREA", "unknown", "イベント書名を確認できません", { reason: "イベント名を取得できません" });
+function validateTitleComponents(derived: DerivedEvent, plan: RulePlan): ValidationResult {
+  if (derived.event.name.state !== "present") return result(plan, "タイトル", "MULTI_AREA", "CROSS_AREA", "unknown", "イベント名のタイトル要素を確認できません", { reason: "イベント名を取得できません" });
   const eventName = derived.event.name.value;
-  const eventBook = resolveEventBookTitle(eventName);
-  if (eventBook.status === "none") return result(plan, "書名", "MULTI_AREA", "CROSS_AREA", "skipped", "イベント名に括弧付き書名がないため比較しません");
-  if (eventBook.status === "ambiguous") return result(plan, "書名", "MULTI_AREA", "CROSS_AREA", "unknown", "イベント書名を確認できません", {
-    reason: `最長の書名候補が複数あります: ${eventBook.candidates.join("、")}`
-  });
+  if (extractTitleComponents(eventName).length === 0) return result(plan, "タイトル", "MULTI_AREA", "CROSS_AREA", "skipped", "イベント名に括弧付きタイトル要素がないため比較しません");
   const tickets = derived.tickets.filter((ticket) => !hasRole(ticket, "plan-change") && !hasRole(ticket, "operation-member"));
-  if (tickets.some((ticket) => ticket.name.state === "unavailable" || ticket.name.state === "invalid")) return result(plan, "書名", "MULTI_AREA", "CROSS_AREA", "unknown", "チケット書名を確認できません", { reason: "券名を取得できない券があります" });
+  if (tickets.some((ticket) => ticket.name.state === "unavailable" || ticket.name.state === "invalid")) return result(plan, "タイトル", "MULTI_AREA", "CROSS_AREA", "unknown", "券名のタイトル要素を確認できません", { reason: "券名を取得できない券があります" });
   const errors = tickets.flatMap((ticket) => {
-    if (ticket.name.state !== "present") return [];
-    const error = validateTicketNameBookTitle(eventName, ticket.name.value);
+    const ticketName = ticket.name.state === "present" ? ticket.name.value : "";
+    const error = validateTicketNameTitleComponents(eventName, ticketName);
     return error ? [`[${ticket.position}番目] ${error}`] : [];
   });
-  return result(plan, "書名", "MULTI_AREA", "CROSS_AREA", errors.length === 0 ? "passed" : "failed", errors.length === 0 ? "書名は一致しています" : errors.join(" / "));
+  return result(plan, "タイトル", "MULTI_AREA", "CROSS_AREA", errors.length === 0 ? "passed" : "failed", errors.length === 0 ? "タイトル要素は一致しています" : errors.join(" / "));
 }
